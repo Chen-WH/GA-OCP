@@ -1,169 +1,23 @@
 #pragma once
 
-#include <crocoddyl/core/diff-action-base.hpp>
-#include <crocoddyl/core/residual-base.hpp>
-#include <crocoddyl/core/utils/exception.hpp>
-#include <crocoddyl/core/state-base.hpp>
+#include <memory>
+#include <stdexcept>
+
 #include <Eigen/Dense>
-#include "TetraPGA/Kinematics.hpp"
-#include "TetraPGA/Dynamics.hpp"
+#include <crocoddyl/core/residual-base.hpp>
+#include <crocoddyl/core/state-base.hpp>
+
 #include "TetraPGA/Collision.hpp"
+#include "TetraPGA/Kinematics.hpp"
+#include "ga_ocp/CrocoddylActions.hpp"
 
 using namespace TetraPGA;
 
-/****** define the Differential Action Model ******/
+template <typename Scalar>
+class ResidualModelTetraPGAJointAcceleration;
 
 template <typename Scalar>
-class DifferentialActionModelGA;
-
-template <typename Scalar>
-struct DifferentialActionDataGA : public crocoddyl::DifferentialActionDataAbstractTpl<Scalar>,
-                                   public crocoddyl::DataCollectorAbstractTpl<Scalar> {
-  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
-  typedef crocoddyl::DifferentialActionDataAbstractTpl<Scalar> Base;
-  typedef crocoddyl::CostDataSumTpl<Scalar> CostDataSum;
-  typedef crocoddyl::DataCollectorAbstractTpl<Scalar> DataCollectorAbstract;
-
-  Data<Scalar> ga_data;
-  std::shared_ptr<CostDataSum> costs;
-
-  template <typename Model>
-  explicit DifferentialActionDataGA(Model* const model);
-};
-
-template <typename Scalar>
-class DifferentialActionModelGA : public crocoddyl::DifferentialActionModelAbstractTpl<Scalar> {
- public:
-  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-  
-  friend struct DifferentialActionDataGA<Scalar>;
-
-  DifferentialActionModelGA(std::shared_ptr<crocoddyl::StateAbstractTpl<Scalar>> state,
-                    const Model<Scalar>& ga_model,
-                    std::shared_ptr<crocoddyl::CostModelSumTpl<Scalar>> cost_model = nullptr)
-      : crocoddyl::DifferentialActionModelAbstractTpl<Scalar>(state, ga_model.dof_a), // nu = dof_a (假设全驱动)
-        ga_model_(ga_model),
-        costs_(cost_model) {
-    // 检查 State 维度与 GA 模型是否匹配
-    if (state->get_nq() != static_cast<std::size_t>(ga_model.dof_a) || 
-        state->get_nv() != static_cast<std::size_t>(ga_model.dof_a)) {
-    }
-  }
-
-  virtual ~DifferentialActionModelGA() {}
-
-  virtual void calc(const std::shared_ptr<crocoddyl::DifferentialActionDataAbstract>& data,
-                    const Eigen::Ref<const typename crocoddyl::MathBaseTpl<Scalar>::VectorXs>& x,
-                    const Eigen::Ref<const typename crocoddyl::MathBaseTpl<Scalar>::VectorXs>& u) {
-    // 1. 转换 Data 指针
-    DifferentialActionDataGA<Scalar>* d = static_cast<DifferentialActionDataGA<Scalar>*>(data.get());
-
-    // 2. 拆分状态 x = [q; v]
-    const std::size_t nq = this->get_state()->get_nq();
-    const std::size_t nv = this->get_state()->get_nv();
-
-    // 3. 调用正向动力学
-    // forwardDynamics 计算出 acceleration 并存入 ga_data.ddq
-    forwardDynamics(ga_model_, d->ga_data, x.head(nq), x.tail(nv), u);
-    forwardKinematics(ga_model_, d->ga_data, x.head(nq));
-
-    // 4. 将结果赋值给 Crocoddyl 需要的 xout (即 acceleration)
-    d->xout = d->ga_data.ddq;
-
-    // 5. 计算 Cost
-    if (costs_) {
-      costs_->calc(d->costs, x, u);
-      d->cost = d->costs->cost;
-    } else {
-      d->cost = 0;
-    }
-  }
-
-  virtual void calcDiff(const std::shared_ptr<crocoddyl::DifferentialActionDataAbstract>& data,
-                        const Eigen::Ref<const typename crocoddyl::MathBaseTpl<Scalar>::VectorXs>& x,
-                        const Eigen::Ref<const typename crocoddyl::MathBaseTpl<Scalar>::VectorXs>& u) {
-	    DifferentialActionDataGA<Scalar>* d = static_cast<DifferentialActionDataGA<Scalar>*>(data.get());
-	
-	    const std::size_t nq = this->get_state()->get_nq();
-	    const std::size_t nv = this->get_state()->get_nv();
-	
-	    // 1. 调用一阶导数算法
-	    // 该函数会填充 ga_data.pddq_pq, ga_data.pddq_pdq, ga_data.pddq_ptau
-	    forwardDynamics_fo(ga_model_, d->ga_data, x.head(nq), x.tail(nv), u);
-
-    // 2. 填充 Fx (Dynamics Jacobian w.r.t State)
-    // Fx = [ da/dq, da/dv ]
-    // 注意：Data 中的矩阵是 resize 过的，直接赋值是安全的
-    d->Fx.leftCols(nv) = d->ga_data.pddq_pq;
-    d->Fx.rightCols(nv) = d->ga_data.pddq_pdq;
-
-    // 3. 填充 Fu (Dynamics Jacobian w.r.t Control)
-    d->Fu = d->ga_data.pddq_ptau;
-
-    // 4. 计算 Cost Derivatives 并复制到 data
-    if (costs_) {
-      costs_->calcDiff(d->costs, x, u);
-      // 关键：将 cost 梯度复制到 action data
-      d->Lx = d->costs->Lx;
-      d->Lu = d->costs->Lu;
-      d->Lxx = d->costs->Lxx;
-      d->Lxu = d->costs->Lxu;
-      d->Luu = d->costs->Luu;
-    }
-  }
-
-  // ===========================================================================
-  // 创建数据结构
-  // ===========================================================================
-  virtual std::shared_ptr<crocoddyl::DifferentialActionDataAbstract> createData() {
-    return std::make_shared<DifferentialActionDataGA<Scalar>>(this);
-  }
-
-  virtual std::shared_ptr<crocoddyl::DifferentialActionModelBase> cloneAsDouble() const {
-    // 简化实现：不支持跨标量类型克隆
-    throw std::runtime_error("cloneAsDouble not implemented for DifferentialActionModelGA");
-  }
-
-  virtual std::shared_ptr<crocoddyl::DifferentialActionModelBase> cloneAsFloat() const {
-    // 简化实现：不支持跨标量类型克隆
-    throw std::runtime_error("cloneAsFloat not implemented for DifferentialActionModelGA");
-  }
-
-  // ===========================================================================
-  // 访问接口
-  // ===========================================================================
-  const Model<Scalar>& get_ga_model() const { 
-      return ga_model_; 
-  }
-
- private:
-  Model<Scalar> ga_model_;
-  std::shared_ptr<crocoddyl::CostModelSumTpl<Scalar>> costs_;
-};
-
-template <typename Scalar>
-template <typename Model>
-DifferentialActionDataGA<Scalar>::DifferentialActionDataGA(Model* const model)
-    : crocoddyl::DifferentialActionDataAbstractTpl<Scalar>(model),
-      ga_data(static_cast<DifferentialActionModelGA<Scalar>*>(model)->get_ga_model())
-{
-    // 初始化 costs 数据
-    auto ga_model_ptr = static_cast<DifferentialActionModelGA<Scalar>*>(model);
-    if (ga_model_ptr->costs_) {
-        costs = ga_model_ptr->costs_->createData(
-            static_cast<DataCollectorAbstract*>(this));
-    }
-}
-
-
-/****** define the Acceleration Residual Model for forward dynamics ******/
-
-template <typename Scalar>
-class ResidualModelAccelerationGA;
-
-template <typename Scalar>
-struct ResidualDataAccelerationGA
+struct ResidualDataTetraPGAJointAcceleration
     : public crocoddyl::ResidualDataAbstractTpl<Scalar> {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   using Base = crocoddyl::ResidualDataAbstractTpl<Scalar>;
@@ -171,29 +25,29 @@ struct ResidualDataAccelerationGA
   Data<Scalar>* ga_data;
 
   template <typename Model>
-  explicit ResidualDataAccelerationGA(
+  explicit ResidualDataTetraPGAJointAcceleration(
       Model* const model,
       crocoddyl::DataCollectorAbstractTpl<Scalar>* const data)
       : Base(model, data),
         ga_data(nullptr) {
-    auto* action_data = dynamic_cast<DifferentialActionDataGA<Scalar>*>(data);
+    auto* action_data = dynamic_cast<DifferentialActionDataTetraPGAForwardDynamics<Scalar>*>(data);
     if (action_data == nullptr) {
       throw std::invalid_argument(
-          "ResidualDataAccelerationGA requires DifferentialActionDataGA as data collector");
+          "ResidualDataTetraPGAJointAcceleration requires DifferentialActionDataTetraPGAForwardDynamics as data collector");
     }
     ga_data = &action_data->ga_data;
   }
 };
 
 template <typename Scalar>
-class ResidualModelAccelerationGA
+class ResidualModelTetraPGAJointAcceleration
     : public crocoddyl::ResidualModelAbstractTpl<Scalar> {
  public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   using Base = crocoddyl::ResidualModelAbstractTpl<Scalar>;
   using VectorXs = typename crocoddyl::MathBaseTpl<Scalar>::VectorXs;
 
-  ResidualModelAccelerationGA(
+  ResidualModelTetraPGAJointAcceleration(
       const std::shared_ptr<crocoddyl::StateAbstractTpl<Scalar>>& state,
       const Model<Scalar>& ga_model,
       const VectorXs& a_ref)
@@ -209,14 +63,14 @@ class ResidualModelAccelerationGA
   void calc(const std::shared_ptr<crocoddyl::ResidualDataAbstract>& data,
             const Eigen::Ref<const VectorXs>& x,
             const Eigen::Ref<const VectorXs>& u) override {
-    auto* d = static_cast<ResidualDataAccelerationGA<Scalar>*>(data.get());
+    auto* d = static_cast<ResidualDataTetraPGAJointAcceleration<Scalar>*>(data.get());
     data->r = d->ga_data->ddq - a_ref_;
   }
 
   void calcDiff(const std::shared_ptr<crocoddyl::ResidualDataAbstract>& data,
                 const Eigen::Ref<const VectorXs>& x,
                 const Eigen::Ref<const VectorXs>& u) override {
-    auto* d = static_cast<ResidualDataAccelerationGA<Scalar>*>(data.get());
+    auto* d = static_cast<ResidualDataTetraPGAJointAcceleration<Scalar>*>(data.get());
     const std::size_t nq = this->get_state()->get_nq();
     const std::size_t nv = this->get_state()->get_nv();
 
@@ -229,7 +83,7 @@ class ResidualModelAccelerationGA
 
   std::shared_ptr<crocoddyl::ResidualDataAbstract> createData(
       crocoddyl::DataCollectorAbstract* const data) override {
-    return std::make_shared<ResidualDataAccelerationGA<Scalar>>(
+    return std::make_shared<ResidualDataTetraPGAJointAcceleration<Scalar>>(
         this, static_cast<crocoddyl::DataCollectorAbstractTpl<Scalar>*>(data));
   }
 
@@ -237,142 +91,11 @@ class ResidualModelAccelerationGA
   Model<Scalar> ga_model_;
   VectorXs a_ref_;
 };
-
-/****** define the Inverse-Dynamics Differential Action Model ******/
+template <typename Scalar>
+class ResidualModelTetraPGAJointTorque;
 
 template <typename Scalar>
-class DifferentialActionModelGAInv;
-
-template <typename Scalar>
-struct DifferentialActionDataGAInv
-    : public crocoddyl::DifferentialActionDataAbstractTpl<Scalar>,
-      public crocoddyl::DataCollectorAbstractTpl<Scalar> {
-  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
-  typedef crocoddyl::DifferentialActionDataAbstractTpl<Scalar> Base;
-  typedef crocoddyl::CostDataSumTpl<Scalar> CostDataSum;
-  typedef crocoddyl::DataCollectorAbstractTpl<Scalar> DataCollectorAbstract;
-
-  Data<Scalar> ga_data;
-  std::shared_ptr<CostDataSum> costs;
-
-  template <typename Model>
-  explicit DifferentialActionDataGAInv(Model* const model);
-};
-
-template <typename Scalar>
-class DifferentialActionModelGAInv
-    : public crocoddyl::DifferentialActionModelAbstractTpl<Scalar> {
- public:
-  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-
-  friend struct DifferentialActionDataGAInv<Scalar>;
-
-  DifferentialActionModelGAInv(
-      std::shared_ptr<crocoddyl::StateAbstractTpl<Scalar>> state,
-      const Model<Scalar>& ga_model,
-      std::shared_ptr<crocoddyl::CostModelSumTpl<Scalar>> cost_model = nullptr)
-      : crocoddyl::DifferentialActionModelAbstractTpl<Scalar>(
-            state, ga_model.dof_a),
-        ga_model_(ga_model),
-        costs_(cost_model) {}
-
-  virtual ~DifferentialActionModelGAInv() {}
-
-  virtual void calc(
-      const std::shared_ptr<crocoddyl::DifferentialActionDataAbstract>& data,
-      const Eigen::Ref<const typename crocoddyl::MathBaseTpl<Scalar>::VectorXs>& x,
-      const Eigen::Ref<const typename crocoddyl::MathBaseTpl<Scalar>::VectorXs>& u) {
-    DifferentialActionDataGAInv<Scalar>* d =
-        static_cast<DifferentialActionDataGAInv<Scalar>*>(data.get());
-
-    const std::size_t nq = this->get_state()->get_nq();
-    const std::size_t nv = this->get_state()->get_nv();
-
-    inverseDynamics(ga_model_, d->ga_data, x.head(nq), x.tail(nv), u);
-    forwardKinematics(ga_model_, d->ga_data, x.head(nq));
-
-    d->xout = u;
-
-    if (costs_) {
-      costs_->calc(d->costs, x, u);
-      d->cost = d->costs->cost;
-    } else {
-      d->cost = 0;
-    }
-  }
-
-  virtual void calcDiff(
-      const std::shared_ptr<crocoddyl::DifferentialActionDataAbstract>& data,
-      const Eigen::Ref<const typename crocoddyl::MathBaseTpl<Scalar>::VectorXs>& x,
-      const Eigen::Ref<const typename crocoddyl::MathBaseTpl<Scalar>::VectorXs>& u) {
-    DifferentialActionDataGAInv<Scalar>* d =
-        static_cast<DifferentialActionDataGAInv<Scalar>*>(data.get());
-
-    const std::size_t nq = this->get_state()->get_nq();
-    const std::size_t nv = this->get_state()->get_nv();
-
-    inverseDynamics_fo(ga_model_, d->ga_data, x.head(nq), x.tail(nv), u);
-
-    d->Fx.setZero();
-    d->Fu.setZero();
-    d->Fu.leftCols(nv).diagonal().setOnes();
-
-    if (costs_) {
-      costs_->calcDiff(d->costs, x, u);
-      d->Lx = d->costs->Lx;
-      d->Lu = d->costs->Lu;
-      d->Lxx = d->costs->Lxx;
-      d->Lxu = d->costs->Lxu;
-      d->Luu = d->costs->Luu;
-    }
-  }
-
-  virtual std::shared_ptr<crocoddyl::DifferentialActionDataAbstract>
-  createData() {
-    return std::make_shared<DifferentialActionDataGAInv<Scalar>>(this);
-  }
-
-  virtual std::shared_ptr<crocoddyl::DifferentialActionModelBase>
-  cloneAsDouble() const {
-    throw std::runtime_error(
-        "cloneAsDouble not implemented for DifferentialActionModelGAInv");
-  }
-
-  virtual std::shared_ptr<crocoddyl::DifferentialActionModelBase>
-  cloneAsFloat() const {
-    throw std::runtime_error(
-        "cloneAsFloat not implemented for DifferentialActionModelGAInv");
-  }
-
-  const Model<Scalar>& get_ga_model() const { return ga_model_; }
-
- private:
-  Model<Scalar> ga_model_;
-  std::shared_ptr<crocoddyl::CostModelSumTpl<Scalar>> costs_;
-};
-
-template <typename Scalar>
-template <typename Model>
-DifferentialActionDataGAInv<Scalar>::DifferentialActionDataGAInv(Model* const model)
-    : crocoddyl::DifferentialActionDataAbstractTpl<Scalar>(model),
-      ga_data(static_cast<DifferentialActionModelGAInv<Scalar>*>(model)->get_ga_model()) {
-  auto ga_model_ptr = static_cast<DifferentialActionModelGAInv<Scalar>*>(model);
-  this->Fu.setZero();
-  this->Fu.leftCols(model->get_state()->get_nv()).diagonal().setOnes();
-  if (ga_model_ptr->costs_) {
-    costs = ga_model_ptr->costs_->createData(
-        static_cast<DataCollectorAbstract*>(this));
-  }
-}
-
-/****** define the Joint-Effort Residual Model for inverse dynamics ******/
-
-template <typename Scalar>
-class ResidualModelJointEffortGAInv;
-
-template <typename Scalar>
-struct ResidualDataJointEffortGAInv
+struct ResidualDataTetraPGAJointTorque
     : public crocoddyl::ResidualDataAbstractTpl<Scalar> {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   using Base = crocoddyl::ResidualDataAbstractTpl<Scalar>;
@@ -380,29 +103,29 @@ struct ResidualDataJointEffortGAInv
   Data<Scalar>* ga_data;
 
   template <typename Model>
-  explicit ResidualDataJointEffortGAInv(
+  explicit ResidualDataTetraPGAJointTorque(
       Model* const model,
       crocoddyl::DataCollectorAbstractTpl<Scalar>* const data)
       : Base(model, data),
         ga_data(nullptr) {
-    auto* action_data = dynamic_cast<DifferentialActionDataGAInv<Scalar>*>(data);
+    auto* action_data = dynamic_cast<DifferentialActionDataTetraPGAInverseDynamics<Scalar>*>(data);
     if (action_data == nullptr) {
       throw std::invalid_argument(
-          "ResidualDataJointEffortGAInv requires DifferentialActionDataGAInv as data collector");
+          "ResidualDataTetraPGAJointTorque requires DifferentialActionDataTetraPGAInverseDynamics as data collector");
     }
     ga_data = &action_data->ga_data;
   }
 };
 
 template <typename Scalar>
-class ResidualModelJointEffortGAInv
+class ResidualModelTetraPGAJointTorque
     : public crocoddyl::ResidualModelAbstractTpl<Scalar> {
  public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   using Base = crocoddyl::ResidualModelAbstractTpl<Scalar>;
   using VectorXs = typename crocoddyl::MathBaseTpl<Scalar>::VectorXs;
 
-  ResidualModelJointEffortGAInv(
+  ResidualModelTetraPGAJointTorque(
       const std::shared_ptr<crocoddyl::StateAbstractTpl<Scalar>>& state,
       const Model<Scalar>& ga_model,
       const VectorXs& tau_ref)
@@ -418,14 +141,14 @@ class ResidualModelJointEffortGAInv
   void calc(const std::shared_ptr<crocoddyl::ResidualDataAbstract>& data,
             const Eigen::Ref<const VectorXs>& x,
             const Eigen::Ref<const VectorXs>& u) override {
-    auto* d = static_cast<ResidualDataJointEffortGAInv<Scalar>*>(data.get());
+    auto* d = static_cast<ResidualDataTetraPGAJointTorque<Scalar>*>(data.get());
     data->r = d->ga_data->tau - tau_ref_;
   }
 
   void calcDiff(const std::shared_ptr<crocoddyl::ResidualDataAbstract>& data,
                 const Eigen::Ref<const VectorXs>& x,
                 const Eigen::Ref<const VectorXs>& u) override {
-    auto* d = static_cast<ResidualDataJointEffortGAInv<Scalar>*>(data.get());
+    auto* d = static_cast<ResidualDataTetraPGAJointTorque<Scalar>*>(data.get());
     const std::size_t nq = this->get_state()->get_nq();
     const std::size_t nv = this->get_state()->get_nv();
 
@@ -438,7 +161,7 @@ class ResidualModelJointEffortGAInv
 
   std::shared_ptr<crocoddyl::ResidualDataAbstract> createData(
       crocoddyl::DataCollectorAbstract* const data) override {
-    return std::make_shared<ResidualDataJointEffortGAInv<Scalar>>(
+    return std::make_shared<ResidualDataTetraPGAJointTorque<Scalar>>(
         this, static_cast<crocoddyl::DataCollectorAbstractTpl<Scalar>*>(data));
   }
 
@@ -452,7 +175,7 @@ class ResidualModelJointEffortGAInv
 /****** define the Placement Residual Model ******/
 
 template <typename Scalar>
-class ResidualModelFramePlacementGA;
+class ResidualModelTetraPGAFramePlacement;
 
 template <typename Scalar, typename Derived>
 inline Motor3D<Scalar> align_motor_hemisphere(const Motor3D<Scalar>& reference,
@@ -466,7 +189,7 @@ inline Motor3D<Scalar> align_motor_hemisphere(const Motor3D<Scalar>& reference,
 }
 
 template <typename Scalar>
-struct ResidualDataFramePlacementGA
+struct ResidualDataTetraPGAFramePlacement
     : public crocoddyl::ResidualDataAbstractTpl<Scalar> {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   using Base = crocoddyl::ResidualDataAbstractTpl<Scalar>;
@@ -476,15 +199,15 @@ struct ResidualDataFramePlacementGA
   Eigen::Matrix<Scalar, 6, Eigen::Dynamic> J;
 
   template <typename Model>
-  explicit ResidualDataFramePlacementGA(
+  explicit ResidualDataTetraPGAFramePlacement(
       Model* const model,
       crocoddyl::DataCollectorAbstractTpl<Scalar>* const data)
       : Base(model, data),
         ga_data(nullptr) {
-    auto* action_data = dynamic_cast<DifferentialActionDataGA<Scalar>*>(data);
+    auto* action_data = dynamic_cast<DifferentialActionDataTetraPGAForwardDynamics<Scalar>*>(data);
     if (action_data == nullptr) {
       throw std::invalid_argument(
-          "ResidualDataFramePlacementGA requires DifferentialActionDataGA as data collector");
+          "ResidualDataTetraPGAFramePlacement requires DifferentialActionDataTetraPGAForwardDynamics as data collector");
     }
     ga_data = &action_data->ga_data;
     J.resize(6, ga_data->q.size());
@@ -492,14 +215,14 @@ struct ResidualDataFramePlacementGA
 };
 
 template <typename Scalar>
-class ResidualModelFramePlacementGA
+class ResidualModelTetraPGAFramePlacement
     : public crocoddyl::ResidualModelAbstractTpl<Scalar> {
  public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   using Base = crocoddyl::ResidualModelAbstractTpl<Scalar>;
   using VectorXs = typename crocoddyl::MathBaseTpl<Scalar>::VectorXs;
 
-  ResidualModelFramePlacementGA(
+  ResidualModelTetraPGAFramePlacement(
       const std::shared_ptr<crocoddyl::StateAbstractTpl<Scalar>>& state,
       const Model<Scalar>& ga_model,
       const Motor3D<Scalar>& M_ref)
@@ -515,7 +238,7 @@ class ResidualModelFramePlacementGA
   void calc(const std::shared_ptr<crocoddyl::ResidualDataAbstract>& data,
             const Eigen::Ref<const VectorXs>& x,
             const Eigen::Ref<const VectorXs>& u) override {
-    auto* d = static_cast<ResidualDataFramePlacementGA<Scalar>*>(data.get());
+    auto* d = static_cast<ResidualDataTetraPGAFramePlacement<Scalar>*>(data.get());
 
     const auto M_cur = d->ga_data->M.col(ga_model_.n - 1);
     d->r = ga_log(ga_mul(ga_rev(align_motor_hemisphere(M_ref_, M_cur)), M_cur));
@@ -525,7 +248,7 @@ class ResidualModelFramePlacementGA
   void calcDiff(const std::shared_ptr<crocoddyl::ResidualDataAbstract>& data,
                 const Eigen::Ref<const VectorXs>& x,
                 const Eigen::Ref<const VectorXs>& u) override {
-    auto* d = static_cast<ResidualDataFramePlacementGA<Scalar>*>(data.get());
+    auto* d = static_cast<ResidualDataTetraPGAFramePlacement<Scalar>*>(data.get());
     const std::size_t nq = this->get_state()->get_nq();
 
     forwardKinematics(ga_model_, *(d->ga_data), x.head(nq));
@@ -543,7 +266,7 @@ class ResidualModelFramePlacementGA
 
   std::shared_ptr<crocoddyl::ResidualDataAbstract> createData(
       crocoddyl::DataCollectorAbstract* const data) override {
-    return std::make_shared<ResidualDataFramePlacementGA<Scalar>>(
+    return std::make_shared<ResidualDataTetraPGAFramePlacement<Scalar>>(
         this, static_cast<crocoddyl::DataCollectorAbstractTpl<Scalar>*>(data));
   }
 
@@ -557,10 +280,10 @@ class ResidualModelFramePlacementGA
 /****** define the Motor Residual Model ******/
 
 template <typename Scalar>
-class ResidualModelFrameMotorGA;
+class ResidualModelTetraPGAFrameMotor;
 
 template <typename Scalar>
-struct ResidualDataFrameMotorGA
+struct ResidualDataTetraPGAFrameMotor
     : public crocoddyl::ResidualDataAbstractTpl<Scalar> {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   using Base = crocoddyl::ResidualDataAbstractTpl<Scalar>;
@@ -570,15 +293,15 @@ struct ResidualDataFrameMotorGA
   Eigen::Matrix<Scalar, 8, Eigen::Dynamic> J;
 
   template <typename Model>
-  explicit ResidualDataFrameMotorGA(
+  explicit ResidualDataTetraPGAFrameMotor(
       Model* const model,
       crocoddyl::DataCollectorAbstractTpl<Scalar>* const data)
       : Base(model, data),
         ga_data(nullptr) {
-    auto* action_data = dynamic_cast<DifferentialActionDataGA<Scalar>*>(data);
+    auto* action_data = dynamic_cast<DifferentialActionDataTetraPGAForwardDynamics<Scalar>*>(data);
     if (action_data == nullptr) {
       throw std::invalid_argument(
-          "ResidualDataFrameMotorGA requires DifferentialActionDataGA as data collector");
+          "ResidualDataTetraPGAFrameMotor requires DifferentialActionDataTetraPGAForwardDynamics as data collector");
     }
     ga_data = &action_data->ga_data;
     J.resize(8, ga_data->q.size());
@@ -586,14 +309,14 @@ struct ResidualDataFrameMotorGA
 };
 
 template <typename Scalar>
-class ResidualModelFrameMotorGA
+class ResidualModelTetraPGAFrameMotor
     : public crocoddyl::ResidualModelAbstractTpl<Scalar> {
  public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   using Base = crocoddyl::ResidualModelAbstractTpl<Scalar>;
   using VectorXs = typename crocoddyl::MathBaseTpl<Scalar>::VectorXs;
 
-  ResidualModelFrameMotorGA(
+  ResidualModelTetraPGAFrameMotor(
       const std::shared_ptr<crocoddyl::StateAbstractTpl<Scalar>>& state,
       const Model<Scalar>& ga_model,
       const Motor3D<Scalar>& M_ref)
@@ -609,7 +332,7 @@ class ResidualModelFrameMotorGA
   void calc(const std::shared_ptr<crocoddyl::ResidualDataAbstract>& data,
             const Eigen::Ref<const VectorXs>& x,
             const Eigen::Ref<const VectorXs>& u) override {
-    auto* d = static_cast<ResidualDataFrameMotorGA<Scalar>*>(data.get());
+    auto* d = static_cast<ResidualDataTetraPGAFrameMotor<Scalar>*>(data.get());
 
     const auto M_cur = d->ga_data->M.col(ga_model_.n - 1);
     d->r = M_cur - align_motor_hemisphere(M_ref_, M_cur);
@@ -619,7 +342,7 @@ class ResidualModelFrameMotorGA
   void calcDiff(const std::shared_ptr<crocoddyl::ResidualDataAbstract>& data,
                 const Eigen::Ref<const VectorXs>& x,
                 const Eigen::Ref<const VectorXs>& u) override {
-    auto* d = static_cast<ResidualDataFrameMotorGA<Scalar>*>(data.get());
+    auto* d = static_cast<ResidualDataTetraPGAFrameMotor<Scalar>*>(data.get());
     const std::size_t nq = this->get_state()->get_nq();
 
     motorJacobian(ga_model_, *(d->ga_data), x.head(nq));
@@ -632,7 +355,7 @@ class ResidualModelFrameMotorGA
 
   std::shared_ptr<crocoddyl::ResidualDataAbstract> createData(
       crocoddyl::DataCollectorAbstract* const data) override {
-    return std::make_shared<ResidualDataFrameMotorGA<Scalar>>(
+    return std::make_shared<ResidualDataTetraPGAFrameMotor<Scalar>>(
         this, static_cast<crocoddyl::DataCollectorAbstractTpl<Scalar>*>(data));
   }
 
@@ -646,44 +369,44 @@ class ResidualModelFrameMotorGA
 /****** define the Collision Residual Model ******/
 
 template <typename Scalar>
-class ResidualModelCollisionGA;
+class ResidualModelTetraPGACollisionDistance;
 
 template <typename Scalar>
-struct ResidualDataCollisionGA
+struct ResidualDataTetraPGACollisionDistance
     : public crocoddyl::ResidualDataAbstractTpl<Scalar> {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   using Base = crocoddyl::ResidualDataAbstractTpl<Scalar>;
 
-  Data<Scalar>* ga_data;  // 指向 DifferentialActionDataGA 中的 ga_data
+  Data<Scalar>* ga_data;  // 指向 DifferentialActionDataTetraPGAForwardDynamics 中的 ga_data
   Environment<Scalar> env;
   EnvironmentData<Scalar> env_data;
 
   template <typename Model>
-  explicit ResidualDataCollisionGA(
+  explicit ResidualDataTetraPGACollisionDistance(
       Model* const model,
       crocoddyl::DataCollectorAbstractTpl<Scalar>* const data)
       : Base(model, data),
-        env(static_cast<ResidualModelCollisionGA<Scalar>*>(model)->get_environment()),
-        env_data(static_cast<ResidualModelCollisionGA<Scalar>*>(model)->get_ga_model(),
-                 static_cast<ResidualModelCollisionGA<Scalar>*>(model)->get_environment()) {
-    auto* action_data = dynamic_cast<DifferentialActionDataGA<Scalar>*>(data);
+        env(static_cast<ResidualModelTetraPGACollisionDistance<Scalar>*>(model)->get_environment()),
+        env_data(static_cast<ResidualModelTetraPGACollisionDistance<Scalar>*>(model)->get_ga_model(),
+                 static_cast<ResidualModelTetraPGACollisionDistance<Scalar>*>(model)->get_environment()) {
+    auto* action_data = dynamic_cast<DifferentialActionDataTetraPGAForwardDynamics<Scalar>*>(data);
     if (action_data == nullptr) {
       throw std::invalid_argument(
-          "ResidualDataCollisionGA requires DifferentialActionDataGA as data collector");
+          "ResidualDataTetraPGACollisionDistance requires DifferentialActionDataTetraPGAForwardDynamics as data collector");
     }
     ga_data = &(action_data->ga_data);
   }
 };
 
 template <typename Scalar>
-class ResidualModelCollisionGA
+class ResidualModelTetraPGACollisionDistance
     : public crocoddyl::ResidualModelAbstractTpl<Scalar> {
  public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   using Base = crocoddyl::ResidualModelAbstractTpl<Scalar>;
   using VectorXs = typename crocoddyl::MathBaseTpl<Scalar>::VectorXs;
 
-  ResidualModelCollisionGA(
+  ResidualModelTetraPGACollisionDistance(
       const std::shared_ptr<crocoddyl::StateAbstractTpl<Scalar>>& state,
       const Model<Scalar>& ga_model,
       const Environment<Scalar>& env,
@@ -701,7 +424,7 @@ class ResidualModelCollisionGA
   void calc(const std::shared_ptr<crocoddyl::ResidualDataAbstract>& data,
             const Eigen::Ref<const VectorXs>& x,
             const Eigen::Ref<const VectorXs>& u) override {
-    auto* d = static_cast<ResidualDataCollisionGA<Scalar>*>(data.get());
+    auto* d = static_cast<ResidualDataTetraPGACollisionDistance<Scalar>*>(data.get());
     
     // Compute collision distances for all pairs
     computeDistance(ga_model_, *(d->ga_data), d->env, d->env_data);
@@ -716,10 +439,8 @@ class ResidualModelCollisionGA
   void calcDiff(const std::shared_ptr<crocoddyl::ResidualDataAbstract>& data,
                 const Eigen::Ref<const VectorXs>& x,
                 const Eigen::Ref<const VectorXs>& u) override {
-    auto* d = static_cast<ResidualDataCollisionGA<Scalar>*>(data.get());
+    auto* d = static_cast<ResidualDataTetraPGACollisionDistance<Scalar>*>(data.get());
     const std::size_t nq = this->get_state()->get_nq();
-    const std::size_t nv = this->get_state()->get_nv();
-
     // Baseline path: recompute witness geometry inside calcDiff.
     computeDistanceJacobian(ga_model_, *(d->ga_data), d->env, d->env_data);
     
@@ -736,7 +457,7 @@ class ResidualModelCollisionGA
 
   std::shared_ptr<crocoddyl::ResidualDataAbstract> createData(
       crocoddyl::DataCollectorAbstract* const data) override {
-    return std::make_shared<ResidualDataCollisionGA<Scalar>>(
+    return std::make_shared<ResidualDataTetraPGACollisionDistance<Scalar>>(
         this, static_cast<crocoddyl::DataCollectorAbstractTpl<Scalar>*>(data));
   }
 
@@ -753,44 +474,44 @@ class ResidualModelCollisionGA
 /****************Cache version******************************/
 
 template <typename Scalar>
-class ResidualModelCollisionCacheGA;
+class ResidualModelTetraPGACachedCollisionDistance;
 
 template <typename Scalar>
-struct ResidualDataCollisionCacheGA
+struct ResidualDataTetraPGACachedCollisionDistance
     : public crocoddyl::ResidualDataAbstractTpl<Scalar> {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   using Base = crocoddyl::ResidualDataAbstractTpl<Scalar>;
 
-  Data<Scalar>* ga_data;  // 指向 DifferentialActionDataGA 中的 ga_data
+  Data<Scalar>* ga_data;  // 指向 DifferentialActionDataTetraPGAForwardDynamics 中的 ga_data
   Environment<Scalar> env;
   EnvironmentData<Scalar> env_data;
 
   template <typename Model>
-  explicit ResidualDataCollisionCacheGA(
+  explicit ResidualDataTetraPGACachedCollisionDistance(
       Model* const model,
       crocoddyl::DataCollectorAbstractTpl<Scalar>* const data)
       : Base(model, data),
-        env(static_cast<ResidualModelCollisionCacheGA<Scalar>*>(model)->get_environment()),
-        env_data(static_cast<ResidualModelCollisionCacheGA<Scalar>*>(model)->get_ga_model(),
-                 static_cast<ResidualModelCollisionCacheGA<Scalar>*>(model)->get_environment()) {
-    auto* action_data = dynamic_cast<DifferentialActionDataGA<Scalar>*>(data);
+        env(static_cast<ResidualModelTetraPGACachedCollisionDistance<Scalar>*>(model)->get_environment()),
+        env_data(static_cast<ResidualModelTetraPGACachedCollisionDistance<Scalar>*>(model)->get_ga_model(),
+                 static_cast<ResidualModelTetraPGACachedCollisionDistance<Scalar>*>(model)->get_environment()) {
+    auto* action_data = dynamic_cast<DifferentialActionDataTetraPGAForwardDynamics<Scalar>*>(data);
     if (action_data == nullptr) {
       throw std::invalid_argument(
-          "ResidualDataCollisionCacheGA requires DifferentialActionDataGA as data collector");
+          "ResidualDataTetraPGACachedCollisionDistance requires DifferentialActionDataTetraPGAForwardDynamics as data collector");
     }
     ga_data = &(action_data->ga_data);
   }
 };
 
 template <typename Scalar>
-class ResidualModelCollisionCacheGA
+class ResidualModelTetraPGACachedCollisionDistance
     : public crocoddyl::ResidualModelAbstractTpl<Scalar> {
  public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
   using Base = crocoddyl::ResidualModelAbstractTpl<Scalar>;
   using VectorXs = typename crocoddyl::MathBaseTpl<Scalar>::VectorXs;
 
-  ResidualModelCollisionCacheGA(
+  ResidualModelTetraPGACachedCollisionDistance(
       const std::shared_ptr<crocoddyl::StateAbstractTpl<Scalar>>& state,
       const Model<Scalar>& ga_model,
       const Environment<Scalar>& env,
@@ -808,7 +529,7 @@ class ResidualModelCollisionCacheGA
   void calc(const std::shared_ptr<crocoddyl::ResidualDataAbstract>& data,
             const Eigen::Ref<const VectorXs>& x,
             const Eigen::Ref<const VectorXs>& u) override {
-    auto* d = static_cast<ResidualDataCollisionCacheGA<Scalar>*>(data.get());
+    auto* d = static_cast<ResidualDataTetraPGACachedCollisionDistance<Scalar>*>(data.get());
     
     // Compute and cache witness geometry for all collision pairs.
     computeDistanceCache(ga_model_, *(d->ga_data), d->env, d->env_data);
@@ -823,10 +544,8 @@ class ResidualModelCollisionCacheGA
   void calcDiff(const std::shared_ptr<crocoddyl::ResidualDataAbstract>& data,
                 const Eigen::Ref<const VectorXs>& x,
                 const Eigen::Ref<const VectorXs>& u) override {
-    auto* d = static_cast<ResidualDataCollisionCacheGA<Scalar>*>(data.get());
+    auto* d = static_cast<ResidualDataTetraPGACachedCollisionDistance<Scalar>*>(data.get());
     const std::size_t nq = this->get_state()->get_nq();
-    const std::size_t nv = this->get_state()->get_nv();
-
     // Reuse the witness geometry cached in calc().
     higherKinematics(ga_model_, *(d->ga_data), x.head(nq));
 
@@ -845,7 +564,7 @@ class ResidualModelCollisionCacheGA
 
   std::shared_ptr<crocoddyl::ResidualDataAbstract> createData(
       crocoddyl::DataCollectorAbstract* const data) override {
-    return std::make_shared<ResidualDataCollisionCacheGA<Scalar>>(
+    return std::make_shared<ResidualDataTetraPGACachedCollisionDistance<Scalar>>(
         this, static_cast<crocoddyl::DataCollectorAbstractTpl<Scalar>*>(data));
   }
 

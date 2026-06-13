@@ -22,7 +22,8 @@
 #include <pinocchio/algorithm/rnea.hpp>
 #include <pinocchio/parsers/urdf.hpp>
 
-#include "ga_ocp/CrocoddylIntegration.hpp"
+#include "ga_ocp/CrocoddylActions.hpp"
+#include "ga_ocp/CrocoddylResiduals.hpp"
 #include "TetraPGA/ModelRepo.hpp"
 
 typedef std::chrono::high_resolution_clock Clock;
@@ -212,7 +213,7 @@ int main() {
   auto ga_acc_cost =
       std::make_shared<crocoddyl::CostModelResidual>(ga_state, ga_acc_residual);
 
-  auto ga_tau_residual = std::make_shared<ResidualModelJointEffortGAInv<double>>(
+  auto ga_tau_residual = std::make_shared<ResidualModelTetraPGAJointTorque<double>>(
       ga_state, ur_model, Eigen::VectorXd::Zero(ur_model.dof_a));
   auto ga_tau_cost =
       std::make_shared<crocoddyl::CostModelResidual>(ga_state, ga_tau_residual);
@@ -243,9 +244,9 @@ int main() {
   ga_terminal_cost->addCost("vel_limit", ga_vel_cost, 100.0);
 
   auto ga_diff_model =
-      std::make_shared<DifferentialActionModelGAInv<double>>(ga_state, ur_model, ga_running_cost);
+      std::make_shared<DifferentialActionModelTetraPGAInverseDynamics<double>>(ga_state, ur_model, ga_running_cost);
   auto ga_diff_model_term =
-      std::make_shared<DifferentialActionModelGAInv<double>>(ga_state, ur_model, ga_terminal_cost);
+      std::make_shared<DifferentialActionModelTetraPGAInverseDynamics<double>>(ga_state, ur_model, ga_terminal_cost);
 
   std::cout << "\n[TetraPGA Validation] Checking derivatives..." << std::endl;
   auto ga_num_diff =

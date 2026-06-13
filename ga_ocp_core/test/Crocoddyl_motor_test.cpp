@@ -29,7 +29,8 @@
 
 // TetraPGA Includes
 #include "TetraPGA/ModelRepo.hpp"
-#include "ga_ocp/CrocoddylIntegration.hpp"
+#include "ga_ocp/CrocoddylActions.hpp"
+#include "ga_ocp/CrocoddylResiduals.hpp"
 
 typedef std::chrono::high_resolution_clock Clock;
 typedef std::chrono::milliseconds milliseconds;
@@ -251,7 +252,7 @@ int main() {
     const Motor3D<double> ga_M_ref = ga_ref_data.M.col(ur_model.n - 1);
     std::cout << "Target Motor: " << ga_M_ref.transpose() << std::endl;
 
-    auto ga_placement_residual = std::make_shared<ResidualModelFramePlacementGA<double>>(
+    auto ga_placement_residual = std::make_shared<ResidualModelTetraPGAFramePlacement<double>>(
         state, ur_model, ga_M_ref);
     auto ga_placement_cost = std::make_shared<crocoddyl::CostModelResidual>(state, ga_placement_residual);
 
@@ -277,9 +278,9 @@ int main() {
     terminal_cost_model->addCost("vel_limit", vel_limit_cost, 100.0);
 
     // 3. 构建 Action Model
-    auto ga_diff_model = std::make_shared<DifferentialActionModelGA<double>>(
+    auto ga_diff_model = std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(
         state, ur_model, running_cost_model);
-    auto ga_diff_model_term = std::make_shared<DifferentialActionModelGA<double>>(
+    auto ga_diff_model_term = std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(
         state, ur_model, terminal_cost_model);
     ga_diff_model->set_u_lb(torque_lb);
     ga_diff_model->set_u_ub(torque_ub);
@@ -339,7 +340,7 @@ int main() {
     auto motor_running_cost_model = std::make_shared<crocoddyl::CostModelSum>(state);
     auto motor_terminal_cost_model = std::make_shared<crocoddyl::CostModelSum>(state);
 
-    auto ga_motor_residual = std::make_shared<ResidualModelFrameMotorGA<double>>(
+    auto ga_motor_residual = std::make_shared<ResidualModelTetraPGAFrameMotor<double>>(
         state, ur_model, ga_M_ref);
     auto ga_motor_cost = std::make_shared<crocoddyl::CostModelResidual>(state, ga_motor_residual);
 
@@ -348,9 +349,9 @@ int main() {
     motor_terminal_cost_model->addCost("motor_reg", ga_motor_cost, 100.0);
     motor_terminal_cost_model->addCost("vel_limit", vel_limit_cost, 100.0);
 
-    auto ga_motor_diff_model = std::make_shared<DifferentialActionModelGA<double>>(
+    auto ga_motor_diff_model = std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(
         state, ur_model, motor_running_cost_model);
-    auto ga_motor_diff_model_term = std::make_shared<DifferentialActionModelGA<double>>(
+    auto ga_motor_diff_model_term = std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(
         state, ur_model, motor_terminal_cost_model);
     ga_motor_diff_model->set_u_lb(torque_lb);
     ga_motor_diff_model->set_u_ub(torque_ub);

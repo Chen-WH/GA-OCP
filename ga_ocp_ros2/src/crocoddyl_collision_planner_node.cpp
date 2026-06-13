@@ -31,7 +31,8 @@
 #include <crocoddyl/multibody/residuals/state.hpp>
 
 #include "TetraPGA/Collision.hpp"
-#include "ga_ocp/CrocoddylIntegration.hpp"
+#include "ga_ocp/CrocoddylActions.hpp"
+#include "ga_ocp/CrocoddylResiduals.hpp"
 #include "TetraPGA/Kinematics.hpp"
 #include "TetraPGA/ModelRepo.hpp"
 #include "TetraPGA/PGA.hpp"
@@ -412,7 +413,7 @@ private:
     auto running_cost_model = std::make_shared<crocoddyl::CostModelSum>(state_);
     auto terminal_cost_model = std::make_shared<crocoddyl::CostModelSum>(state_);
 
-    auto placement_residual = std::make_shared<ResidualModelFramePlacementGA<double>>(state_, model_, M_ref);
+    auto placement_residual = std::make_shared<ResidualModelTetraPGAFramePlacement<double>>(state_, model_, M_ref);
     auto placement_cost = std::make_shared<crocoddyl::CostModelResidual>(state_, placement_residual);
 
     const Eigen::VectorXd x_zero = Eigen::VectorXd::Zero(2 * model_.dof_a);
@@ -432,7 +433,7 @@ private:
 
     if (env_.num_static_sphere > 0) {
       auto collision_residual =
-          std::make_shared<ResidualModelCollisionGA<double>>(state_, model_, env_, safety_distance_);
+          std::make_shared<ResidualModelTetraPGACollisionDistance<double>>(state_, model_, env_, safety_distance_);
       const int num_collision_pairs = model_.num_collision_ssl * env_.num_static_sphere;
       crocoddyl::ActivationBounds bounds;
       bounds.lb = Eigen::VectorXd::Zero(num_collision_pairs);
@@ -450,9 +451,9 @@ private:
     terminal_cost_model->addCost("vel_limit", vel_limit_cost, velocity_limit_weight_);
 
     auto diff_model =
-        std::make_shared<DifferentialActionModelGA<double>>(state_, model_, running_cost_model);
+        std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(state_, model_, running_cost_model);
     auto diff_model_term =
-        std::make_shared<DifferentialActionModelGA<double>>(state_, model_, terminal_cost_model);
+        std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(state_, model_, terminal_cost_model);
 
     auto running_iam = std::make_shared<crocoddyl::IntegratedActionModelEuler>(diff_model, dt_);
     auto terminal_iam = std::make_shared<crocoddyl::IntegratedActionModelEuler>(diff_model_term, dt_);

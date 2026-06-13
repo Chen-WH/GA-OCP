@@ -18,7 +18,8 @@
 #include <crocoddyl/core/states/euclidean.hpp>
 #include <crocoddyl/multibody/residuals/state.hpp>
 
-#include "ga_ocp/CrocoddylIntegration.hpp"
+#include "ga_ocp/CrocoddylActions.hpp"
+#include "ga_ocp/CrocoddylResiduals.hpp"
 #include "TetraPGA/ModelRepo.hpp"
 
 namespace {
@@ -81,7 +82,7 @@ std::shared_ptr<crocoddyl::ShootingProblem> buildProblem(
     auto terminal_cost_model = std::make_shared<crocoddyl::CostModelSum>(state);
 
     auto placement_residual =
-        std::make_shared<ResidualModelFramePlacementGA<double>>(state, ur_model, M_ref);
+        std::make_shared<ResidualModelTetraPGAFramePlacement<double>>(state, ur_model, M_ref);
     auto placement_cost =
         std::make_shared<crocoddyl::CostModelResidual>(state, placement_residual);
 
@@ -124,8 +125,8 @@ std::shared_ptr<crocoddyl::ShootingProblem> buildProblem(
     terminal_cost_model->addCost("collision", collision_cost, 100.0);
 
     auto diff_model =
-        std::make_shared<DifferentialActionModelGA<double>>(state, ur_model, running_cost_model);
-    auto diff_model_term = std::make_shared<DifferentialActionModelGA<double>>(
+        std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(state, ur_model, running_cost_model);
+    auto diff_model_term = std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(
         state, ur_model, terminal_cost_model);
     diff_model->set_u_lb(torque_lb);
     diff_model->set_u_ub(torque_ub);
@@ -257,9 +258,9 @@ int main() {
     std::cout << "[Initial State] q0: " << q0.transpose() << std::endl;
     std::cout << "[Target State] q_ref: " << q_ref.transpose() << std::endl;
 
-    const auto base_problem = buildProblem<ResidualModelCollisionGA<double>>(
+    const auto base_problem = buildProblem<ResidualModelTetraPGACollisionDistance<double>>(
         state, ur_model, env, x0, M_ref, dt, horizon, d_safe);
-    const auto cache_problem = buildProblem<ResidualModelCollisionCacheGA<double>>(
+    const auto cache_problem = buildProblem<ResidualModelTetraPGACachedCollisionDistance<double>>(
         state, ur_model, env, x0, M_ref, dt, horizon, d_safe);
 
     const auto base_result =

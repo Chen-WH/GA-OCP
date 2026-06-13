@@ -44,7 +44,8 @@
 #include <pinocchio/spatial/inertia.hpp>
 #include <pinocchio/spatial/se3.hpp>
 
-#include "ga_ocp/CrocoddylIntegration.hpp"
+#include "ga_ocp/CrocoddylActions.hpp"
+#include "ga_ocp/CrocoddylResiduals.hpp"
 #include "TetraPGA/ModelRepo.hpp"
 
 #ifdef GA_OCP_HAS_CASADI_BENCH
@@ -642,7 +643,7 @@ class ClosedLoopMpcNode : public rclcpp::Node {
       running_cost->addCost("vel_limit", vel_cost, velocity_limit_weight_);
 
       auto diff_model =
-          std::make_shared<DifferentialActionModelGA<double>>(state, ga_model_, running_cost);
+          std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(state, ga_model_, running_cost);
       diff_model->set_u_lb(-effort_limit_);
       diff_model->set_u_ub(effort_limit_);
       running_models.push_back(
@@ -656,7 +657,7 @@ class ClosedLoopMpcNode : public rclcpp::Node {
         std::make_shared<crocoddyl::CostModelResidual>(state, terminal_state_residual);
     terminal_cost->addCost("state_reg", terminal_state_cost, state_terminal_weight_);
     auto terminal_diff =
-        std::make_shared<DifferentialActionModelGA<double>>(state, ga_model_, terminal_cost);
+        std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(state, ga_model_, terminal_cost);
     terminal_diff->set_u_lb(-effort_limit_);
     terminal_diff->set_u_ub(effort_limit_);
     auto terminal_model =

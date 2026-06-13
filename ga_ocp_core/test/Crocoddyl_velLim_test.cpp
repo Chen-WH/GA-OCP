@@ -27,7 +27,8 @@
 
 // Your Custom Library Includes
 #include "TetraPGA/ModelRepo.hpp"
-#include "ga_ocp/CrocoddylIntegration.hpp"
+#include "ga_ocp/CrocoddylActions.hpp"
+#include "ga_ocp/CrocoddylResiduals.hpp"
 
 typedef std::chrono::high_resolution_clock Clock;
 typedef std::chrono::milliseconds milliseconds;
@@ -210,11 +211,11 @@ int main() {
     // -------------------------------------------------------------------------
     // 3. 构建 Action Model (Build Action Model)
     // -------------------------------------------------------------------------
-    auto diff_model = std::make_shared<DifferentialActionModelGA<double>>(
+    auto diff_model = std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(
         state, ur_model, running_cost_model
     );
     
-    auto diff_model_term = std::make_shared<DifferentialActionModelGA<double>>(
+    auto diff_model_term = std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(
         state, ur_model, terminal_cost_model
     );
 
