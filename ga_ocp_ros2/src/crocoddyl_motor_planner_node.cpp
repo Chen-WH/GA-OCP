@@ -33,7 +33,8 @@
 #include <crocoddyl/core/states/euclidean.hpp>
 #include <crocoddyl/multibody/residuals/state.hpp>
 
-#include "ga_ocp/CrocoddylIntegration.hpp"
+#include "ga_ocp/CrocoddylActions.hpp"
+#include "ga_ocp/CrocoddylResiduals.hpp"
 #include "TetraPGA/Kinematics.hpp"
 #include "TetraPGA/ModelRepo.hpp"
 
@@ -377,7 +378,7 @@ private:
     auto terminal_cost_model = std::make_shared<crocoddyl::CostModelSum>(state_);
 
     auto motor_residual =
-        std::make_shared<ResidualModelFramePlacementGA<double>>(state_, model_, M_ref);
+        std::make_shared<ResidualModelTetraPGAFramePlacement<double>>(state_, model_, M_ref);
     auto motor_cost = std::make_shared<crocoddyl::CostModelResidual>(state_, motor_residual);
 
     Eigen::VectorXd x_zero = Eigen::VectorXd::Zero(2 * model_.dof_a);
@@ -401,8 +402,8 @@ private:
     terminal_cost_model->addCost("motor_reg", motor_cost, terminal_motor_weight_);
     terminal_cost_model->addCost("vel_limit", vel_limit_cost, velocity_limit_weight_);
 
-    auto diff_model = std::make_shared<DifferentialActionModelGA<double>>(state_, model_, running_cost_model);
-    auto diff_model_term = std::make_shared<DifferentialActionModelGA<double>>(state_, model_, terminal_cost_model);
+    auto diff_model = std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(state_, model_, running_cost_model);
+    auto diff_model_term = std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(state_, model_, terminal_cost_model);
 
     auto running_iam = std::make_shared<crocoddyl::IntegratedActionModelEuler>(diff_model, dt_);
     auto terminal_iam = std::make_shared<crocoddyl::IntegratedActionModelEuler>(diff_model_term, dt_);

@@ -24,7 +24,8 @@
 
 // Your Custom Library Includes
 #include "TetraPGA/ModelRepo.hpp"
-#include "ga_ocp/CrocoddylIntegration.hpp"
+#include "ga_ocp/CrocoddylActions.hpp"
+#include "ga_ocp/CrocoddylResiduals.hpp"
 
 typedef std::chrono::high_resolution_clock Clock;
 typedef std::chrono::milliseconds milliseconds;
@@ -149,10 +150,10 @@ int main() {
     running_cost_model->addCost("state_reg", state_cost, 1.0);
     terminal_cost_model->addCost("state_reg", state_cost, 1000.0);
 
-    auto diff_model = std::make_shared<DifferentialActionModelGA<double>>(
+    auto diff_model = std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(
         state, ur_model, running_cost_model
     );
-    auto diff_model_term = std::make_shared<DifferentialActionModelGA<double>>(
+    auto diff_model_term = std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(
         state, ur_model, terminal_cost_model
     );
     diff_model->set_u_lb(torque_lb);

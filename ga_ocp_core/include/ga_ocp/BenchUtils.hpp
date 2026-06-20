@@ -41,7 +41,8 @@
 #include <pinocchio/autodiff/casadi-algo.hpp>
 #endif
 
-#include "ga_ocp/CrocoddylIntegration.hpp"
+#include "ga_ocp/CrocoddylActions.hpp"
+#include "ga_ocp/CrocoddylResiduals.hpp"
 #include "TetraPGA/ModelRepo.hpp"
 
 using namespace TetraPGA;
@@ -927,7 +928,7 @@ inline std::shared_ptr<crocoddyl::ShootingProblem> BuildGAFDDPProblem(
 
   auto state_residual = std::make_shared<crocoddyl::ResidualModelState>(state, x_target);
   auto state_cost = std::make_shared<crocoddyl::CostModelResidual>(state, state_residual);
-  auto acc_residual = std::make_shared<ResidualModelAccelerationGA<double>>(
+  auto acc_residual = std::make_shared<ResidualModelTetraPGAJointAcceleration<double>>(
       state, ga_model, Eigen::VectorXd::Zero(ga_model.dof_a));
   auto acc_cost = std::make_shared<crocoddyl::CostModelResidual>(state, acc_residual);
   auto tau_residual = std::make_shared<crocoddyl::ResidualModelControl>(state, ga_model.dof_a);
@@ -939,9 +940,9 @@ inline std::shared_ptr<crocoddyl::ShootingProblem> BuildGAFDDPProblem(
   terminal_cost->addCost("state_reg", state_cost, config.terminal_weight);
 
   auto running_diff =
-      std::make_shared<DifferentialActionModelGA<double>>(state, ga_model, running_cost);
+      std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(state, ga_model, running_cost);
   auto terminal_diff =
-      std::make_shared<DifferentialActionModelGA<double>>(state, ga_model, terminal_cost);
+      std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(state, ga_model, terminal_cost);
 
   auto running_model =
       std::make_shared<crocoddyl::IntegratedActionModelEuler>(running_diff, config.dt);
@@ -1001,7 +1002,7 @@ inline std::shared_ptr<crocoddyl::ShootingProblem> BuildGAIDMPCProblem(
   auto state_cost = std::make_shared<crocoddyl::CostModelResidual>(state, state_residual);
   auto acc_residual = std::make_shared<crocoddyl::ResidualModelControl>(state, ga_model.dof_a);
   auto acc_cost = std::make_shared<crocoddyl::CostModelResidual>(state, acc_residual);
-  auto tau_residual = std::make_shared<ResidualModelJointEffortGAInv<double>>(
+  auto tau_residual = std::make_shared<ResidualModelTetraPGAJointTorque<double>>(
       state, ga_model, Eigen::VectorXd::Zero(ga_model.dof_a));
   auto tau_cost = std::make_shared<crocoddyl::CostModelResidual>(state, tau_residual);
 
@@ -1012,9 +1013,9 @@ inline std::shared_ptr<crocoddyl::ShootingProblem> BuildGAIDMPCProblem(
   terminal_cost->addCost("tau_reg", tau_cost, config.tau_weight);
 
   auto running_diff =
-      std::make_shared<DifferentialActionModelGAInv<double>>(state, ga_model, running_cost);
+      std::make_shared<DifferentialActionModelTetraPGAInverseDynamics<double>>(state, ga_model, running_cost);
   auto terminal_diff =
-      std::make_shared<DifferentialActionModelGAInv<double>>(state, ga_model, terminal_cost);
+      std::make_shared<DifferentialActionModelTetraPGAInverseDynamics<double>>(state, ga_model, terminal_cost);
 
   auto running_model =
       std::make_shared<crocoddyl::IntegratedActionModelEuler>(running_diff, config.dt);
