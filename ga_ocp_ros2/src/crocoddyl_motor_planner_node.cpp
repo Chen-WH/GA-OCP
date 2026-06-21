@@ -341,7 +341,7 @@ private:
     updateStatus("Status: planning");
     const auto start = std::chrono::steady_clock::now();
     const auto& target_msg = last_target_pose_.value();
-    const Motor3D<double> M_ref = motorFromPose(target_msg.pose);
+    const Motor3D<double> M_ref_raw = motorFromPose(target_msg.pose);
 
     Eigen::VectorXd x0(2 * model_.dof_a);
     x0.head(model_.dof_a) = joint_pos_;
@@ -359,6 +359,11 @@ private:
       x0[model_.dof_a + i] = std::clamp(x0[model_.dof_a + i], -1.0, 1.0);
       x0[i] = std::clamp(x0[i], model_.lowerPositionLimit[i], model_.upperPositionLimit[i]);
     }
+
+    Data<double> initial_data(model_);
+    forwardKinematics(model_, initial_data, x0.head(model_.dof_a));
+    const Motor3D<double> M_ref = align_motor_hemisphere(
+        M_ref_raw, initial_data.M.col(model_.n - 1));
 
     RCLCPP_INFO(this->get_logger(),
                 "Planning request: target_p=(%.3f,%.3f,%.3f) target_q=(%.4f,%.4f,%.4f,%.4f) "
