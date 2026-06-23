@@ -13,6 +13,8 @@
 
 using namespace TetraPGA;
 
+/****** define the Joint Acceleration Residual Model ******/
+
 template <typename Scalar>
 class ResidualModelTetraPGAJointAcceleration;
 
@@ -91,6 +93,8 @@ class ResidualModelTetraPGAJointAcceleration
   Model<Scalar> ga_model_;
   VectorXs a_ref_;
 };
+
+/****** define the Joint Torque Residual Model ******/
 
 template <typename Scalar>
 class ResidualModelTetraPGAJointTorque;

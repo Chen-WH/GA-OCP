@@ -264,7 +264,7 @@ int main() {
 
     const auto base_problem = buildProblem<ResidualModelTetraPGACollisionDistance<double>>(
         state, ur_model, env, x0, M_ref, dt, horizon, d_safe);
-    const auto cache_problem = buildProblem<ResidualModelTetraPGACachedCollisionDistance<double>>(
+    const auto cache_problem = buildProblem<ResidualModelTetraPGACollisionDistance<double>>(
         state, ur_model, env, x0, M_ref, dt, horizon, d_safe);
 
     const auto base_result =
