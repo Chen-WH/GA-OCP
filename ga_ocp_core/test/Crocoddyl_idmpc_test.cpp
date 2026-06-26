@@ -136,7 +136,6 @@ int main() {
   pin_running_cost->addCost("tau_reg", pin_tau_cost, 1e-4);
   pin_running_cost->addCost("vel_limit", pin_vel_cost, 100.0);
   pin_terminal_cost->addCost("state_reg", pin_state_cost, 1000.0);
-  pin_terminal_cost->addCost("tau_reg", pin_tau_cost, 1e-4);
   pin_terminal_cost->addCost("vel_limit", pin_vel_cost, 100.0);
 
   auto pin_diff_model =
@@ -240,7 +239,6 @@ int main() {
   ga_running_cost->addCost("tau_reg", ga_tau_cost, 1e-4);
   ga_running_cost->addCost("vel_limit", ga_vel_cost, 100.0);
   ga_terminal_cost->addCost("state_reg", ga_state_cost, 1000.0);
-  ga_terminal_cost->addCost("tau_reg", ga_tau_cost, 1e-4);
   ga_terminal_cost->addCost("vel_limit", ga_vel_cost, 100.0);
 
   auto ga_diff_model =

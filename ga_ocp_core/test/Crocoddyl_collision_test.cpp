@@ -46,6 +46,7 @@ std::vector<SSP<double>> makeObstacles() {
     std::vector<SSP<double>> obstacles;
 
     SSP<double> obs1;
+    obs1.id = 0;
     obs1.radius = 0.15;
     obs1.center = Point3D<double>(0.3, 0.5, 0.9, 1.0);
     obstacles.push_back(obs1);
@@ -234,7 +235,10 @@ int main() {
 
     Data<double> ref_data(ur_model);
     forwardKinematics(ur_model, ref_data, q_ref);
-    const Motor3D<double> M_ref = ref_data.M.col(ur_model.n - 1);
+    Data<double> initial_data(ur_model);
+    forwardKinematics(ur_model, initial_data, q0);
+    const Motor3D<double> M_ref = align_motor_hemisphere(
+        ref_data.M.col(ur_model.n - 1), initial_data.M.col(ur_model.n - 1));
 
     std::vector<Eigen::VectorXd> init_xs(static_cast<std::size_t>(horizon) + 1, x0);
     std::vector<Eigen::VectorXd> init_us(static_cast<std::size_t>(horizon),
@@ -260,7 +264,7 @@ int main() {
 
     const auto base_problem = buildProblem<ResidualModelTetraPGACollisionDistance<double>>(
         state, ur_model, env, x0, M_ref, dt, horizon, d_safe);
-    const auto cache_problem = buildProblem<ResidualModelTetraPGACachedCollisionDistance<double>>(
+    const auto cache_problem = buildProblem<ResidualModelTetraPGACollisionDistance<double>>(
         state, ur_model, env, x0, M_ref, dt, horizon, d_safe);
 
     const auto base_result =

@@ -18,8 +18,9 @@ template <typename Scalar>
 class DifferentialActionModelTetraPGAForwardDynamics;
 
 template <typename Scalar>
-struct DifferentialActionDataTetraPGAForwardDynamics : public crocoddyl::DifferentialActionDataAbstractTpl<Scalar>,
-                                   public crocoddyl::DataCollectorAbstractTpl<Scalar> {
+struct DifferentialActionDataTetraPGAForwardDynamics
+    : public crocoddyl::DifferentialActionDataAbstractTpl<Scalar>,
+      public crocoddyl::DataCollectorAbstractTpl<Scalar> {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
   typedef crocoddyl::DifferentialActionDataAbstractTpl<Scalar> Base;
@@ -86,8 +87,7 @@ class DifferentialActionModelTetraPGAForwardDynamics : public crocoddyl::Differe
 
     // 3. 调用正向动力学
     // forwardDynamics 计算出 acceleration 并存入 ga_data.ddq
-    forwardDynamics(ga_model_, d->ga_data, x.head(nq), x.tail(nv), u);
-    forwardKinematics(ga_model_, d->ga_data, x.head(nq));
+    forwardDynamics0(ga_model_, d->ga_data, x.head(nq), x.tail(nv), u);
 
     // 4. 将结果赋值给 Crocoddyl 需要的 xout (即 acceleration)
     d->xout = d->ga_data.ddq;
@@ -177,8 +177,7 @@ DifferentialActionDataTetraPGAForwardDynamics<Scalar>::DifferentialActionDataTet
     }
 }
 template <typename Scalar>
-class DifferentialActionModelTetraPGAInverseDynamics
-    : public crocoddyl::DifferentialActionModelAbstractTpl<Scalar> {
+class DifferentialActionModelTetraPGAInverseDynamics : public crocoddyl::DifferentialActionModelAbstractTpl<Scalar> {
  public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
@@ -205,8 +204,7 @@ class DifferentialActionModelTetraPGAInverseDynamics
     const std::size_t nq = this->get_state()->get_nq();
     const std::size_t nv = this->get_state()->get_nv();
 
-    inverseDynamics(ga_model_, d->ga_data, x.head(nq), x.tail(nv), u);
-    forwardKinematics(ga_model_, d->ga_data, x.head(nq));
+    inverseDynamics0(ga_model_, d->ga_data, x.head(nq), x.tail(nv), u);
 
     d->xout = u;
 

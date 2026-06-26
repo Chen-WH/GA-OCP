@@ -2,6 +2,7 @@
 #include <vector>
 #include <memory>
 #include <chrono>
+#include <cstdlib>
 #include <random>
 #include <iomanip>
 #include <limits>
@@ -35,39 +36,14 @@
 typedef std::chrono::high_resolution_clock Clock;
 typedef std::chrono::milliseconds milliseconds;
 
-static Motor3D<double> motorFromSE3(const pinocchio::SE3& se3) {
-    Eigen::Quaterniond r(se3.rotation());
-    r.normalize();
-
-    const Eigen::Vector3d t = se3.translation();
-    Eigen::Quaterniond tquat(0.0, t.x(), t.y(), t.z());
-    Eigen::Quaterniond d = tquat * r;
-    d.coeffs() *= 0.5;
-
-    Motor3D<double> M;
-    M << r.w(), r.x(), r.y(), r.z(), d.w(), d.x(), d.y(), d.z();
-    return M;
-}
-
-static void printMotorComparison(const std::string& tag,
-                                 const Motor3D<double>& actual,
-                                 const Motor3D<double>& target) {
-    const Motor3D<double> diff = actual - target;
-    std::cout << "\n[" << tag << "] Motor Comparison" << std::endl;
-    std::cout << "  Target Motor: " << target.transpose() << std::endl;
-    std::cout << "  Actual Motor: " << actual.transpose() << std::endl;
-    std::cout << "  Diff Motor:   " << diff.transpose() << std::endl;
-    std::cout << "  Diff Norm:    " << diff.norm() << std::endl;
-}
-
 int main() {
     double dt = 0.008; // 时间步长
     Model<double> ur_model = ur();
     const Eigen::VectorXd torque_lb = -ur_model.effortLimit;
     const Eigen::VectorXd torque_ub = ur_model.effortLimit;
 
-    // Set random seed using current time for non-deterministic behavior
-    srand((unsigned int) time(0));
+    constexpr unsigned int kRandomSeed = 20260320;
+    std::srand(kRandomSeed);
     
     // =========================================================================
     // Generate Random Initial State and Target State (for both methods)
@@ -82,6 +58,7 @@ int main() {
     std::cout << "Shared q0: " << shared_q0.transpose() << std::endl;
     std::cout << "Shared q_ref: " << shared_q_ref.transpose() << std::endl;
     std::cout << "Shared x0: " << shared_x0.transpose() << std::endl;
+    std::cout << "Random seed: " << kRandomSeed << std::endl;
     
     // =========================================================================
     // Part A: Pinocchio-based 对照组 (Baseline using Pinocchio)
@@ -178,7 +155,7 @@ int main() {
     
     std::vector<std::shared_ptr<crocoddyl::CallbackAbstract>> pin_callbacks;
     auto pin_solve_start = Clock::now();
-    pin_solver.solve({}, {}, 100);
+    const bool pin_converged = pin_solver.solve({}, {}, 300);
     auto pin_solve_end = Clock::now();
     
     auto pin_end = Clock::now();
@@ -188,7 +165,9 @@ int main() {
     
     std::cout << "\n[Pinocchio Results]" << std::endl;
     std::cout << "Final Cost: " << pin_solver.get_cost() << std::endl;
-    std::cout << "Converged:  " << (pin_solver.get_stop() < 1e-5 ? "YES" : "NO") << std::endl;
+    std::cout << "Converged:  " << (pin_converged ? "YES" : "NO") << std::endl;
+    std::cout << "Stop:       " << pin_solver.get_stop()
+              << ", Iter: " << pin_solver.get_iter() << std::endl;
     std::cout << "Total Time: " << pin_total_ms << " ms, Solve Time: " << pin_solve_ms << " ms" << std::endl;
     
     // =========================================================================
@@ -249,7 +228,10 @@ int main() {
 
     Data<double> ga_ref_data(ur_model);
     forwardKinematics(ur_model, ga_ref_data, shared_q_ref);
-    const Motor3D<double> ga_M_ref = ga_ref_data.M.col(ur_model.n - 1);
+    Data<double> ga_initial_data(ur_model);
+    forwardKinematics(ur_model, ga_initial_data, shared_q0);
+    const Motor3D<double> ga_M_ref = align_motor_hemisphere(
+        ga_ref_data.M.col(ur_model.n - 1), ga_initial_data.M.col(ur_model.n - 1));
     std::cout << "Target Motor: " << ga_M_ref.transpose() << std::endl;
 
     auto ga_placement_residual = std::make_shared<ResidualModelTetraPGAFramePlacement<double>>(
@@ -301,7 +283,7 @@ int main() {
     ga_solver.set_th_stop(1e-6);
 
     auto ga_solve_start = Clock::now();
-    ga_solver.solve({}, {}, 100);
+    const bool ga_converged = ga_solver.solve({}, {}, 300);
     auto ga_solve_end = Clock::now();
 
     auto ga_end = Clock::now();
@@ -311,7 +293,9 @@ int main() {
 
     std::cout << "\n[TetraPGA Placement Results]" << std::endl;
     std::cout << "Final Cost: " << ga_solver.get_cost() << std::endl;
-    std::cout << "Converged:  " << (ga_solver.get_stop() < 1e-5 ? "YES" : "NO") << std::endl;
+    std::cout << "Converged:  " << (ga_converged ? "YES" : "NO") << std::endl;
+    std::cout << "Stop:       " << ga_solver.get_stop()
+              << ", Iter: " << ga_solver.get_iter() << std::endl;
     std::cout << "Total Time: " << ga_total_ms << " ms, Solve Time: " << ga_solve_ms << " ms" << std::endl;
 
     // =========================================================================
@@ -373,7 +357,7 @@ int main() {
     ga_motor_solver.set_th_stop(1e-6);
 
     auto ga_motor_solve_start = Clock::now();
-    ga_motor_solver.solve({}, {}, 100);
+    const bool ga_motor_converged = ga_motor_solver.solve({}, {}, 300);
     auto ga_motor_solve_end = Clock::now();
 
     auto ga_motor_end = Clock::now();
@@ -383,7 +367,9 @@ int main() {
 
     std::cout << "\n[TetraPGA Motor Results]" << std::endl;
     std::cout << "Final Cost: " << ga_motor_solver.get_cost() << std::endl;
-    std::cout << "Converged:  " << (ga_motor_solver.get_stop() < 1e-5 ? "YES" : "NO") << std::endl;
+    std::cout << "Converged:  " << (ga_motor_converged ? "YES" : "NO") << std::endl;
+    std::cout << "Stop:       " << ga_motor_solver.get_stop()
+              << ", Iter: " << ga_motor_solver.get_iter() << std::endl;
     std::cout << "Total Time: " << ga_motor_total_ms << " ms, Solve Time: " << ga_motor_solve_ms << " ms" << std::endl;
 
     Eigen::VectorXd ga_motor_x_terminal = ga_motor_solver.get_xs().back();
