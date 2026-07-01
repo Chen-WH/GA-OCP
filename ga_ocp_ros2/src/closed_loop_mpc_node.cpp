@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -31,6 +32,7 @@
 #include <crocoddyl/core/costs/residual.hpp>
 #include <crocoddyl/core/integrator/euler.hpp>
 #include <crocoddyl/core/residuals/control.hpp>
+#include <crocoddyl/core/residuals/joint-acceleration.hpp>
 #include <crocoddyl/core/solvers/box-fddp.hpp>
 #include <crocoddyl/core/states/euclidean.hpp>
 #include <crocoddyl/multibody/actuations/full.hpp>
@@ -46,6 +48,8 @@
 
 #include "ga_ocp/CrocoddylActions.hpp"
 #include "ga_ocp/CrocoddylResiduals.hpp"
+#include "ga_ocp/RuntimeProfiler.hpp"
+#include "TetraPGA/Collision.hpp"
 #include "TetraPGA/ModelRepo.hpp"
 
 #ifdef GA_OCP_HAS_CASADI_BENCH
@@ -70,6 +74,12 @@ struct SolveCycleResult {
   double best_cost = std::numeric_limits<double>::quiet_NaN();
   double final_stop = std::numeric_limits<double>::quiet_NaN();
   double solve_time_ms = 0.0;
+  double problem_build_ms = 0.0;
+  double warm_start_ms = 0.0;
+  double initial_calc_ms = 0.0;
+  double solver_setup_ms = 0.0;
+  ga_ocp::RuntimeProfilerCounters initial_profile;
+  ga_ocp::RuntimeProfilerCounters solver_profile;
   std::size_t iterations = 0;
   bool converged = false;
   bool failed = false;
@@ -81,7 +91,17 @@ struct CycleRecord {
   double tracking_error = 0.0;
   double velocity_error = 0.0;
   double torque_ratio = 0.0;
+  double command_torque_ratio = 0.0;
   double solve_time_ms = 0.0;
+  double reference_build_ms = 0.0;
+  double problem_build_ms = 0.0;
+  double warm_start_ms = 0.0;
+  double initial_calc_ms = 0.0;
+  double solver_setup_ms = 0.0;
+  double mpc_pipeline_time_ms = 0.0;
+  double publish_command_ms = 0.0;
+  ga_ocp::RuntimeProfilerCounters initial_profile;
+  ga_ocp::RuntimeProfilerCounters solver_profile;
   double cycle_time_ms = 0.0;
   double realtime_ratio = 0.0;
   double best_cost = std::numeric_limits<double>::quiet_NaN();
@@ -96,6 +116,7 @@ struct CycleRecord {
   std::string dq_ref;
   std::string q_cmd;
   std::string dq_cmd;
+  std::string ddq_cmd;
   std::string u_cmd;
   std::string effort;
 };
@@ -137,7 +158,9 @@ std::string BackendName(const BackendKind backend) {
   return "unknown";
 }
 
-std::string CsvEscape(const std::string& value) {
+
+
+std::string LocalCsvEscape(const std::string& value) {
   std::string out;
   out.reserve(value.size());
   for (const char c : value) {
@@ -161,7 +184,7 @@ std::string CsvEscape(const std::string& value) {
   return out;
 }
 
-std::string FormatCsvNumber(const double value) {
+std::string LocalFormatCsvNumber(const double value) {
   std::ostringstream oss;
   oss << std::fixed << std::setprecision(9) << value;
   std::string out = oss.str();
@@ -211,6 +234,30 @@ Eigen::Vector3d ParseVector3Param(const std::vector<double>& values, const std::
     throw std::invalid_argument(name + " must contain exactly 3 values");
   }
   return Eigen::Vector3d(values[0], values[1], values[2]);
+}
+
+Eigen::Vector3d DeclareVector3Param(
+    rclcpp::Node& node, const std::string& vector_name,
+    const std::array<std::string, 3>& scalar_names,
+    const std::vector<double>& default_value) {
+  Eigen::Vector3d value = ParseVector3Param(
+      node.declare_parameter<std::vector<double>>(vector_name, default_value), vector_name);
+  std::array<double, 3> scalars{};
+  std::array<bool, 3> scalar_set{};
+  for (std::size_t i = 0; i < scalar_names.size(); ++i) {
+    scalars[i] = node.declare_parameter<double>(
+        scalar_names[i], std::numeric_limits<double>::quiet_NaN());
+    scalar_set[i] = std::isfinite(scalars[i]);
+  }
+  const bool any_set = scalar_set[0] || scalar_set[1] || scalar_set[2];
+  const bool all_set = scalar_set[0] && scalar_set[1] && scalar_set[2];
+  if (any_set && !all_set) {
+    throw std::invalid_argument(vector_name + " scalar x/y/z overrides must be set together");
+  }
+  if (all_set) {
+    value = Eigen::Vector3d(scalars[0], scalars[1], scalars[2]);
+  }
+  return value;
 }
 
 Eigen::VectorXd ToEigenVector(const std::vector<double>& values) {
@@ -327,6 +374,45 @@ RobotConfig MakeRobotConfig(const std::string& robot) {
     return config;
   }
 
+
+  if (robot == "stanford_tidybot" || robot == "tidybot") {
+    const std::string tidybot_urdf =
+        share_dir + "/robot-assets/stanford_tidybot/urdf/tidybot_gen3_10dof.urdf";
+    Model<double> ga_model = model_from_name("stanford_tidybot", tidybot_urdf);
+    ga_model.qa0.resize(10);
+    ga_model.qa0 <<
+        0.0, 0.0, 0.0,
+        0.0, 0.26179939, 3.14159265, -2.26892803,
+        0.0, 0.95993109, 1.57079633;
+
+    RobotConfig config{
+        "stanford_tidybot",
+        tidybot_urdf,
+        "tidybot_gen3_10dof",
+        MakeJointNames({
+            "base_x_joint",
+            "base_y_joint",
+            "base_yaw_joint",
+            "joint_1",
+            "joint_2",
+            "joint_3",
+            "joint_4",
+            "joint_5",
+            "joint_6",
+            "joint_7",
+        }),
+        ga_model,
+        Eigen::Vector3d::Zero(),
+        Eigen::Quaterniond::Identity(),
+        "",
+        Eigen::VectorXd::Constant(10, 0.18),
+    };
+    config.default_amplitudes <<
+        0.18, 0.18, 0.25,
+        0.24, 0.18, 0.24, 0.16, 0.20, 0.14, 0.18;
+    return config;
+  }
+
   throw std::invalid_argument("Unsupported robot: " + robot);
 }
 
@@ -360,6 +446,46 @@ bool ExtractJointVector(const sensor_msgs::msg::JointState& msg,
     out[static_cast<Eigen::Index>(joint_idx)] = source[source_idx];
   }
   return true;
+}
+
+std::shared_ptr<crocoddyl::CostModelAbstract> ProfileCost(
+    const std::shared_ptr<crocoddyl::CostModelAbstract>& cost,
+    const ga_ocp::RuntimeCostCategory category) {
+  return ga_ocp::ProfileCost<double>(cost, category);
+}
+
+double RuntimeCostItemTotalMs(const ga_ocp::RuntimeProfilerCounters& counters,
+                              const ga_ocp::RuntimeCostCategory category) {
+  return ga_ocp::RuntimeProfilerCostItemTotalMs(counters, category);
+}
+
+double RuntimeCostItemTotalMs(const ga_ocp::RuntimeProfilerCounters& counters) {
+  double total = 0.0;
+  for (std::size_t i = 0; i < ga_ocp::kRuntimeCostCategoryCount; ++i) {
+    total += counters.cost_item_calc_ms[i] + counters.cost_item_calcdiff_ms[i];
+  }
+  return total;
+}
+
+Environment<double> MakeRuntimeCollisionEnvironment(const int obstacle_count) {
+  const std::array<Eigen::Vector3d, 8> centers{
+      Eigen::Vector3d(0.15, -0.35, 0.62), Eigen::Vector3d(-0.25, 0.32, 0.82),
+      Eigen::Vector3d(-0.42, -0.05, 0.55), Eigen::Vector3d(0.05, 0.42, 0.95),
+      Eigen::Vector3d(-0.52, 0.18, 0.72), Eigen::Vector3d(0.28, 0.12, 0.48),
+      Eigen::Vector3d(-0.12, -0.48, 0.88), Eigen::Vector3d(0.34, -0.18, 1.08)};
+  std::vector<SSP<double>> spheres;
+  const int count = std::max(0, std::min<int>(obstacle_count, centers.size()));
+  spheres.reserve(static_cast<std::size_t>(count));
+  for (int i = 0; i < count; ++i) {
+    SSP<double> sphere;
+    sphere.id = i;
+    sphere.radius = 0.055;
+    sphere.center = Point3D<double>(centers[static_cast<std::size_t>(i)].x(),
+                                    centers[static_cast<std::size_t>(i)].y(),
+                                    centers[static_cast<std::size_t>(i)].z(), 1.0);
+    spheres.push_back(sphere);
+  }
+  return Environment<double>(spheres);
 }
 
 double ComputeTorqueRatio(const Eigen::VectorXd& effort, const Eigen::VectorXd& effort_limit) {
@@ -405,6 +531,7 @@ class ClosedLoopMpcNode : public rclcpp::Node {
     state_running_weight_ = this->declare_parameter<double>("state_running_weight", 6.0);
     state_terminal_weight_ = this->declare_parameter<double>("state_terminal_weight", 80.0);
     control_weight_ = this->declare_parameter<double>("control_weight", 1e-3);
+    acceleration_weight_ = this->declare_parameter<double>("acceleration_weight", 0.0);
     velocity_limit_weight_ = this->declare_parameter<double>("velocity_limit_weight", 20.0);
     velocity_limit_scale_ = this->declare_parameter<double>("velocity_limit_scale", 0.9);
 
@@ -417,9 +544,33 @@ class ClosedLoopMpcNode : public rclcpp::Node {
     plant_payload_mass_ = this->declare_parameter<double>("plant_payload_mass", 0.0);
     controller_payload_mass_ = this->declare_parameter<double>("controller_payload_mass", 0.0);
     model_payload_ = this->declare_parameter<bool>("model_payload", false);
-    payload_com_attachment_ = ParseVector3Param(
-        this->declare_parameter<std::vector<double>>("payload_com_attachment", {0.0, 0.0, 0.05}),
-        "payload_com_attachment");
+    plant_payload_com_attachment_ = DeclareVector3Param(
+        *this, "plant_payload_com_attachment",
+        {"plant_payload_com_x", "plant_payload_com_y", "plant_payload_com_z"},
+        {0.0, 0.0, 0.05});
+    payload_com_attachment_ = DeclareVector3Param(
+        *this, "payload_com_attachment",
+        {"payload_com_attachment_x", "payload_com_attachment_y", "payload_com_attachment_z"},
+        {0.0, 0.0, 0.05});
+    external_force_ = DeclareVector3Param(
+        *this, "external_force",
+        {"external_force_x", "external_force_y", "external_force_z"},
+        {0.0, 0.0, 0.0});
+    external_torque_ = DeclareVector3Param(
+        *this, "external_torque",
+        {"external_torque_x", "external_torque_y", "external_torque_z"},
+        {0.0, 0.0, 0.0});
+    external_force_body_name_ = this->declare_parameter<std::string>(
+        "external_force_body_name", "wrist_3_link");
+    external_force_start_s_ = this->declare_parameter<double>("external_force_start_s", -1.0);
+    external_force_duration_s_ = this->declare_parameter<double>("external_force_duration_s", 0.0);
+
+    enable_runtime_profiler_ = this->declare_parameter<bool>("enable_runtime_profiler", true);
+    enable_collision_cost_ = this->declare_parameter<bool>("enable_collision_cost", false);
+    collision_weight_ = this->declare_parameter<double>("collision_weight", 50.0);
+    collision_safety_distance_ = this->declare_parameter<double>("collision_safety_distance", 0.08);
+    collision_obstacle_count_ = this->declare_parameter<int>("collision_obstacle_count", 4);
+    ga_ocp::SetRuntimeProfilerEnabled(enable_runtime_profiler_);
 
     std::vector<double> amplitude_override = this->declare_parameter<std::vector<double>>(
         "reference_amplitudes", std::vector<double>{});
@@ -461,8 +612,14 @@ class ClosedLoopMpcNode : public rclcpp::Node {
 
 #ifdef GA_OCP_HAS_CASADI_BENCH
     if (backend_ == BackendKind::kCasadi) {
-      const std::string cache_tag =
-          robot_config_.robot == "ur" ? "closed_loop_ur10" : "closed_loop_leap";
+      std::string cache_tag = "closed_loop_" + robot_config_.robot;
+      if (robot_config_.robot == "ur") {
+        cache_tag = "closed_loop_ur10";
+      } else if (robot_config_.robot == "leap_left") {
+        cache_tag = "closed_loop_leap";
+      } else if (robot_config_.robot == "stanford_tidybot") {
+        cache_tag = "closed_loop_tidybot";
+      }
       casadi_autodiff_ = std::make_shared<InlineAutoDiffABADerivatives>(pin_model_, cache_tag);
     }
 #else
@@ -492,10 +649,17 @@ class ClosedLoopMpcNode : public rclcpp::Node {
     publishStatus("Status: waiting_for_joint_state");
     RCLCPP_INFO(this->get_logger(),
                 "Closed-loop MPC node ready. robot=%s backend=%s budget=%.3f ms horizon=%d "
-                "dt=%.3f control_rate=%.1fHz enforce_budget=%s output=%s",
+                "dt=%.3f control_rate=%.1fHz enforce_budget=%s accel_weight=%.3g output=%s "
+                "plant_payload_com=[%s] controller_payload_com=[%s] "
+                "external_body=%s external_force=[%s] external_torque=[%s]",
                 robot_config_.robot.c_str(), BackendName(backend_).c_str(), solve_budget_ms_,
                 horizon_, dt_, control_rate_hz_, enforce_solve_budget_ ? "true" : "false",
-                output_prefix_.string().c_str());
+                acceleration_weight_, output_prefix_.string().c_str(),
+                FormatVector(plant_payload_com_attachment_).c_str(),
+                FormatVector(payload_com_attachment_).c_str(),
+                external_force_body_name_.c_str(),
+                FormatVector(external_force_).c_str(),
+                FormatVector(external_torque_).c_str());
   }
 
  private:
@@ -612,15 +776,19 @@ class ClosedLoopMpcNode : public rclcpp::Node {
     running_models.reserve(static_cast<std::size_t>(horizon_));
 
     const Eigen::VectorXd x_zero = Eigen::VectorXd::Zero(2 * ga_model_.dof_a);
+    const Eigen::VectorXd a_zero = Eigen::VectorXd::Zero(ga_model_.dof_a);
     for (int t = 0; t < horizon_; ++t) {
       auto running_cost = std::make_shared<crocoddyl::CostModelSum>(state);
       auto state_residual =
           std::make_shared<crocoddyl::ResidualModelState>(state, x_refs[static_cast<std::size_t>(t)]);
-      auto state_cost = std::make_shared<crocoddyl::CostModelResidual>(state, state_residual);
+      std::shared_ptr<crocoddyl::CostModelAbstract> state_cost = ProfileCost(
+          std::make_shared<crocoddyl::CostModelResidual>(state, state_residual),
+          ga_ocp::RuntimeCostCategory::kState);
       auto control_residual =
           std::make_shared<crocoddyl::ResidualModelControl>(state, ga_model_.dof_a);
-      auto control_cost =
-          std::make_shared<crocoddyl::CostModelResidual>(state, control_residual);
+      std::shared_ptr<crocoddyl::CostModelAbstract> control_cost = ProfileCost(
+          std::make_shared<crocoddyl::CostModelResidual>(state, control_residual),
+          ga_ocp::RuntimeCostCategory::kControl);
 
       crocoddyl::ActivationBounds vel_bounds;
       vel_bounds.lb = Eigen::VectorXd::Constant(
@@ -635,12 +803,39 @@ class ClosedLoopMpcNode : public rclcpp::Node {
           std::make_shared<crocoddyl::ResidualModelState>(state, x_zero, ga_model_.dof_a);
       auto vel_activation =
           std::make_shared<crocoddyl::ActivationModelQuadraticBarrier>(vel_bounds);
-      auto vel_cost =
-          std::make_shared<crocoddyl::CostModelResidual>(state, vel_activation, vel_residual);
+      std::shared_ptr<crocoddyl::CostModelAbstract> vel_cost = ProfileCost(
+          std::make_shared<crocoddyl::CostModelResidual>(state, vel_activation, vel_residual),
+          ga_ocp::RuntimeCostCategory::kVelocity);
 
       running_cost->addCost("state_reg", state_cost, state_running_weight_);
       running_cost->addCost("control_reg", control_cost, control_weight_);
+      if (acceleration_weight_ > 0.0) {
+        auto acceleration_residual =
+            std::make_shared<ResidualModelTetraPGAJointAcceleration<double>>(
+                state, ga_model_, a_zero);
+        std::shared_ptr<crocoddyl::CostModelAbstract> acceleration_cost = ProfileCost(
+            std::make_shared<crocoddyl::CostModelResidual>(state, acceleration_residual),
+            ga_ocp::RuntimeCostCategory::kOther);
+        running_cost->addCost("acceleration_reg", acceleration_cost, acceleration_weight_);
+      }
       running_cost->addCost("vel_limit", vel_cost, velocity_limit_weight_);
+      if (enable_collision_cost_ && ga_model_.num_collision_ssl > 0 && collision_obstacle_count_ > 0) {
+        const Environment<double> env = MakeRuntimeCollisionEnvironment(collision_obstacle_count_);
+        auto collision_residual = std::make_shared<ResidualModelTetraPGACollisionDistance<double>>(
+            state, ga_model_, env, collision_safety_distance_);
+        const int num_collision_pairs = ga_model_.num_collision_ssl * env.num_static_sphere;
+        crocoddyl::ActivationBounds collision_bounds;
+        collision_bounds.lb = Eigen::VectorXd::Zero(num_collision_pairs);
+        collision_bounds.ub = Eigen::VectorXd::Constant(
+            num_collision_pairs, std::numeric_limits<double>::infinity());
+        auto collision_activation =
+            std::make_shared<crocoddyl::ActivationModelQuadraticBarrier>(collision_bounds);
+        std::shared_ptr<crocoddyl::CostModelAbstract> collision_cost = ProfileCost(
+            std::make_shared<crocoddyl::CostModelResidual>(
+                state, collision_activation, collision_residual),
+            ga_ocp::RuntimeCostCategory::kCollision);
+        running_cost->addCost("collision", collision_cost, collision_weight_);
+      }
 
       auto diff_model =
           std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(state, ga_model_, running_cost);
@@ -653,9 +848,27 @@ class ClosedLoopMpcNode : public rclcpp::Node {
     auto terminal_cost = std::make_shared<crocoddyl::CostModelSum>(state);
     auto terminal_state_residual =
         std::make_shared<crocoddyl::ResidualModelState>(state, x_refs.back());
-    auto terminal_state_cost =
-        std::make_shared<crocoddyl::CostModelResidual>(state, terminal_state_residual);
+    std::shared_ptr<crocoddyl::CostModelAbstract> terminal_state_cost = ProfileCost(
+        std::make_shared<crocoddyl::CostModelResidual>(state, terminal_state_residual),
+        ga_ocp::RuntimeCostCategory::kState);
     terminal_cost->addCost("state_reg", terminal_state_cost, state_terminal_weight_);
+    if (enable_collision_cost_ && ga_model_.num_collision_ssl > 0 && collision_obstacle_count_ > 0) {
+      const Environment<double> env = MakeRuntimeCollisionEnvironment(collision_obstacle_count_);
+      auto collision_residual = std::make_shared<ResidualModelTetraPGACollisionDistance<double>>(
+          state, ga_model_, env, collision_safety_distance_);
+      const int num_collision_pairs = ga_model_.num_collision_ssl * env.num_static_sphere;
+      crocoddyl::ActivationBounds collision_bounds;
+      collision_bounds.lb = Eigen::VectorXd::Zero(num_collision_pairs);
+      collision_bounds.ub = Eigen::VectorXd::Constant(
+          num_collision_pairs, std::numeric_limits<double>::infinity());
+      auto collision_activation =
+          std::make_shared<crocoddyl::ActivationModelQuadraticBarrier>(collision_bounds);
+      std::shared_ptr<crocoddyl::CostModelAbstract> collision_cost = ProfileCost(
+          std::make_shared<crocoddyl::CostModelResidual>(
+              state, collision_activation, collision_residual),
+          ga_ocp::RuntimeCostCategory::kCollision);
+      terminal_cost->addCost("collision", collision_cost, collision_weight_);
+    }
     auto terminal_diff =
         std::make_shared<DifferentialActionModelTetraPGAForwardDynamics<double>>(state, ga_model_, terminal_cost);
     terminal_diff->set_u_lb(-effort_limit_);
@@ -677,6 +890,7 @@ class ClosedLoopMpcNode : public rclcpp::Node {
     running_models.reserve(static_cast<std::size_t>(horizon_));
 
     const Eigen::VectorXd x_zero = Eigen::VectorXd::Zero(2 * ga_model_.dof_a);
+    const Eigen::VectorXd a_zero = Eigen::VectorXd::Zero(ga_model_.dof_a);
     for (int t = 0; t < horizon_; ++t) {
       auto running_cost = std::make_shared<crocoddyl::CostModelSum>(state);
       auto state_residual =
@@ -705,6 +919,14 @@ class ClosedLoopMpcNode : public rclcpp::Node {
 
       running_cost->addCost("state_reg", state_cost, state_running_weight_);
       running_cost->addCost("control_reg", control_cost, control_weight_);
+      if (acceleration_weight_ > 0.0) {
+        auto acceleration_residual =
+            std::make_shared<crocoddyl::ResidualModelJointAcceleration>(
+                state, a_zero, ga_model_.dof_a);
+        auto acceleration_cost =
+            std::make_shared<crocoddyl::CostModelResidual>(state, acceleration_residual);
+        running_cost->addCost("acceleration_reg", acceleration_cost, acceleration_weight_);
+      }
       running_cost->addCost("vel_limit", vel_cost, velocity_limit_weight_);
 
       auto diff_model = std::make_shared<crocoddyl::DifferentialActionModelFreeFwdDynamics>(
@@ -735,6 +957,7 @@ class ClosedLoopMpcNode : public rclcpp::Node {
     running_models.reserve(static_cast<std::size_t>(horizon_));
 
     const Eigen::VectorXd x_zero = Eigen::VectorXd::Zero(2 * ga_model_.dof_a);
+    const Eigen::VectorXd a_zero = Eigen::VectorXd::Zero(ga_model_.dof_a);
     for (int t = 0; t < horizon_; ++t) {
       auto running_cost = std::make_shared<crocoddyl::CostModelSum>(state);
       auto state_residual =
@@ -763,6 +986,13 @@ class ClosedLoopMpcNode : public rclcpp::Node {
 
       running_cost->addCost("state_reg", state_cost, state_running_weight_);
       running_cost->addCost("control_reg", control_cost, control_weight_);
+      if (acceleration_weight_ > 0.0) {
+        auto acceleration_residual =
+            std::make_shared<ResidualModelAccelerationPinocchioCasadi>(state, a_zero);
+        auto acceleration_cost =
+            std::make_shared<crocoddyl::CostModelResidual>(state, acceleration_residual);
+        running_cost->addCost("acceleration_reg", acceleration_cost, acceleration_weight_);
+      }
       running_cost->addCost("vel_limit", vel_cost, velocity_limit_weight_);
 
       auto diff_model = std::make_shared<DifferentialActionModelPinocchioCasadi>(
@@ -794,6 +1024,7 @@ class ClosedLoopMpcNode : public rclcpp::Node {
     SolveCycleResult result;
 
     std::shared_ptr<crocoddyl::ShootingProblem> problem;
+    const Clock::time_point problem_build_start = Clock::now();
     switch (backend_) {
       case BackendKind::kTetraPGA:
         problem = buildGaProblem(x0, x_refs);
@@ -809,19 +1040,29 @@ class ClosedLoopMpcNode : public rclcpp::Node {
         throw std::runtime_error("CasADi backend not compiled");
 #endif
     }
+    result.problem_build_ms = DurationSeconds(Clock::now() - problem_build_start).count() * 1e3;
 
     std::vector<Eigen::VectorXd> init_xs;
     std::vector<Eigen::VectorXd> init_us;
+    const Clock::time_point warm_start_start = Clock::now();
     initializeWarmStart(x0, x_refs, init_xs, init_us);
+    result.warm_start_ms = DurationSeconds(Clock::now() - warm_start_start).count() * 1e3;
 
     result.best_xs = init_xs;
     result.best_us = init_us;
+    const Clock::time_point initial_calc_start = Clock::now();
+    ga_ocp::ResetRuntimeProfilerCounters();
     result.best_cost = problem->calc(init_xs, init_us);
+    result.initial_profile = ga_ocp::SnapshotRuntimeProfilerCounters();
+    result.initial_calc_ms = DurationSeconds(Clock::now() - initial_calc_start).count() * 1e3;
 
+    const Clock::time_point solver_setup_start = Clock::now();
     crocoddyl::SolverBoxFDDP solver(problem);
     solver.set_th_stop(enforce_solve_budget_ ? std::numeric_limits<double>::min() : stop_tol_);
+    result.solver_setup_ms = DurationSeconds(Clock::now() - solver_setup_start).count() * 1e3;
 
     bool is_feasible = false;
+    ga_ocp::ResetRuntimeProfilerCounters();
     const Clock::time_point start_time = Clock::now();
     while (result.iterations < static_cast<std::size_t>(max_iterations_)) {
       const double elapsed_ms = DurationSeconds(Clock::now() - start_time).count() * 1e3;
@@ -867,6 +1108,7 @@ class ClosedLoopMpcNode : public rclcpp::Node {
     }
 
     result.solve_time_ms = DurationSeconds(Clock::now() - start_time).count() * 1e3;
+    result.solver_profile = ga_ocp::SnapshotRuntimeProfilerCounters();
     return result;
   }
 
@@ -920,14 +1162,20 @@ class ClosedLoopMpcNode : public rclcpp::Node {
     x0.head(ga_model_.dof_a) = joint_pos_;
     x0.tail(ga_model_.dof_a) = joint_vel_;
 
+    const Clock::time_point reference_start = Clock::now();
     const Eigen::VectorXd x_ref_now = referenceStateAt(t);
     const std::vector<Eigen::VectorXd> x_refs = buildReferenceTrajectory(t);
+    const double reference_build_ms = DurationSeconds(Clock::now() - reference_start).count() * 1e3;
+    const Clock::time_point mpc_pipeline_start = Clock::now();
     SolveCycleResult solve = solveCycle(x0, x_refs);
+    const double mpc_pipeline_time_ms =
+        DurationSeconds(Clock::now() - mpc_pipeline_start).count() * 1e3;
 
     Eigen::VectorXd q_cmd = x_refs[std::min<std::size_t>(1u, x_refs.size() - 1u)].head(ga_model_.dof_a);
     Eigen::VectorXd dq_cmd =
         x_refs[std::min<std::size_t>(1u, x_refs.size() - 1u)].tail(ga_model_.dof_a);
     Eigen::VectorXd u_cmd = Eigen::VectorXd::Zero(ga_model_.dof_a);
+    Eigen::VectorXd ddq_cmd = Eigen::VectorXd::Zero(ga_model_.dof_a);
     if (solve.best_xs.size() >= 2u) {
       q_cmd = solve.best_xs[1].head(ga_model_.dof_a);
       dq_cmd = solve.best_xs[1].tail(ga_model_.dof_a);
@@ -935,7 +1183,12 @@ class ClosedLoopMpcNode : public rclcpp::Node {
     if (!solve.best_us.empty()) {
       u_cmd = solve.best_us.front();
     }
+    if (dt_ > 1e-12) {
+      ddq_cmd = (dq_cmd - joint_vel_) / dt_;
+    }
+    const Clock::time_point publish_start = Clock::now();
     publishCommand(q_cmd, dq_cmd, u_cmd);
+    const double publish_command_ms = DurationSeconds(Clock::now() - publish_start).count() * 1e3;
     last_best_xs_ = solve.best_xs;
     last_best_us_ = solve.best_us;
 
@@ -944,7 +1197,17 @@ class ClosedLoopMpcNode : public rclcpp::Node {
     record.tracking_error = (joint_pos_ - x_ref_now.head(ga_model_.dof_a)).norm();
     record.velocity_error = (joint_vel_ - x_ref_now.tail(ga_model_.dof_a)).norm();
     record.torque_ratio = ComputeTorqueRatio(joint_effort_, effort_limit_);
+    record.command_torque_ratio = ComputeTorqueRatio(u_cmd, effort_limit_);
     record.solve_time_ms = solve.solve_time_ms;
+    record.reference_build_ms = reference_build_ms;
+    record.problem_build_ms = solve.problem_build_ms;
+    record.warm_start_ms = solve.warm_start_ms;
+    record.initial_calc_ms = solve.initial_calc_ms;
+    record.solver_setup_ms = solve.solver_setup_ms;
+    record.mpc_pipeline_time_ms = mpc_pipeline_time_ms;
+    record.publish_command_ms = publish_command_ms;
+    record.initial_profile = solve.initial_profile;
+    record.solver_profile = solve.solver_profile;
     record.cycle_time_ms = DurationSeconds(Clock::now() - cycle_start).count() * 1e3;
     record.realtime_ratio =
         record.solve_time_ms / (1e3 / std::max(control_rate_hz_, 1.0));
@@ -960,6 +1223,7 @@ class ClosedLoopMpcNode : public rclcpp::Node {
     record.dq_ref = FormatVector(x_ref_now.tail(ga_model_.dof_a));
     record.q_cmd = FormatVector(q_cmd);
     record.dq_cmd = FormatVector(dq_cmd);
+    record.ddq_cmd = FormatVector(ddq_cmd);
     record.u_cmd = FormatVector(u_cmd);
     record.effort = FormatVector(joint_effort_);
     cycle_records_.push_back(std::move(record));
@@ -971,58 +1235,173 @@ class ClosedLoopMpcNode : public rclcpp::Node {
 
   void writeCycleCsv() const {
     std::ofstream out(output_prefix_.string() + "_cycles.csv");
-    out << "robot,backend,t,tracking_error,velocity_error,torque_ratio,solve_time_ms,"
+    out << "robot,backend,t,tracking_error,velocity_error,torque_ratio,command_torque_ratio,solve_time_ms,"
+           "reference_build_ms,problem_build_ms,warm_start_ms,initial_calc_ms,"
+           "solver_setup_ms,mpc_pipeline_time_ms,publish_command_ms,"
+           "solver_dam_calc_ms,solver_dam_calcdiff_ms,solver_dynamics_calc_ms,"
+           "solver_dynamics_calcdiff_ms,solver_cost_sum_calc_ms,solver_cost_sum_calcdiff_ms,"
+           "solver_cost_item_total_ms,solver_state_cost_total_ms,solver_control_cost_total_ms,"
+           "solver_velocity_cost_total_ms,solver_collision_cost_total_ms,"
+           "solver_collision_residual_total_ms,solver_model_total_ms,solver_overhead_ms,"
+           "solver_dam_calc_calls,solver_dam_calcdiff_calls,"
+           "initial_dam_calc_ms,initial_cost_sum_calc_ms,initial_model_total_ms,"
            "cycle_time_ms,realtime_ratio,iterations,converged,failed,best_cost,final_stop,"
            "plant_mass_scale,plant_payload_mass,controller_payload_mass,model_payload,"
-           "failure_message,q,dq,q_ref,dq_ref,q_cmd,dq_cmd,u_cmd,effort\n";
+           "plant_payload_com,controller_payload_com,payload_com_attachment,"
+           "external_force_body_name,external_force_start_s,external_force_duration_s,"
+           "external_force,external_torque,"
+           "failure_message,q,dq,q_ref,dq_ref,q_cmd,dq_cmd,ddq_cmd,u_cmd,effort\n";
     for (const CycleRecord& record : cycle_records_) {
-      out << CsvEscape(robot_config_.robot) << ','
-          << CsvEscape(BackendName(backend_)) << ','
-          << FormatCsvNumber(record.t) << ','
-          << FormatCsvNumber(record.tracking_error) << ','
-          << FormatCsvNumber(record.velocity_error) << ','
-          << FormatCsvNumber(record.torque_ratio) << ','
-          << FormatCsvNumber(record.solve_time_ms) << ','
-          << FormatCsvNumber(record.cycle_time_ms) << ','
-          << FormatCsvNumber(record.realtime_ratio) << ','
+      out << LocalCsvEscape(robot_config_.robot) << ','
+          << LocalCsvEscape(BackendName(backend_)) << ','
+          << LocalFormatCsvNumber(record.t) << ','
+          << LocalFormatCsvNumber(record.tracking_error) << ','
+          << LocalFormatCsvNumber(record.velocity_error) << ','
+          << LocalFormatCsvNumber(record.torque_ratio) << ','
+          << LocalFormatCsvNumber(record.command_torque_ratio) << ','
+          << LocalFormatCsvNumber(record.solve_time_ms) << ','
+          << LocalFormatCsvNumber(record.reference_build_ms) << ','
+          << LocalFormatCsvNumber(record.problem_build_ms) << ','
+          << LocalFormatCsvNumber(record.warm_start_ms) << ','
+          << LocalFormatCsvNumber(record.initial_calc_ms) << ','
+          << LocalFormatCsvNumber(record.solver_setup_ms) << ','
+          << LocalFormatCsvNumber(record.mpc_pipeline_time_ms) << ','
+          << LocalFormatCsvNumber(record.publish_command_ms) << ','
+          << LocalFormatCsvNumber(record.solver_profile.dam_calc_ms) << ','
+          << LocalFormatCsvNumber(record.solver_profile.dam_calcdiff_ms) << ','
+          << LocalFormatCsvNumber(record.solver_profile.dynamics_calc_ms) << ','
+          << LocalFormatCsvNumber(record.solver_profile.dynamics_calcdiff_ms) << ','
+          << LocalFormatCsvNumber(record.solver_profile.cost_sum_calc_ms) << ','
+          << LocalFormatCsvNumber(record.solver_profile.cost_sum_calcdiff_ms) << ','
+          << LocalFormatCsvNumber(RuntimeCostItemTotalMs(record.solver_profile)) << ','
+          << LocalFormatCsvNumber(RuntimeCostItemTotalMs(record.solver_profile, ga_ocp::RuntimeCostCategory::kState)) << ','
+          << LocalFormatCsvNumber(RuntimeCostItemTotalMs(record.solver_profile, ga_ocp::RuntimeCostCategory::kControl)) << ','
+          << LocalFormatCsvNumber(RuntimeCostItemTotalMs(record.solver_profile, ga_ocp::RuntimeCostCategory::kVelocity)) << ','
+          << LocalFormatCsvNumber(RuntimeCostItemTotalMs(record.solver_profile, ga_ocp::RuntimeCostCategory::kCollision)) << ','
+          << LocalFormatCsvNumber(record.solver_profile.collision_residual_calc_ms +
+                             record.solver_profile.collision_residual_calcdiff_ms) << ','
+          << LocalFormatCsvNumber(ga_ocp::RuntimeProfilerModelTimeMs(record.solver_profile)) << ','
+          << LocalFormatCsvNumber(record.solve_time_ms -
+                             ga_ocp::RuntimeProfilerModelTimeMs(record.solver_profile)) << ','
+          << record.solver_profile.dam_calc_calls << ','
+          << record.solver_profile.dam_calcdiff_calls << ','
+          << LocalFormatCsvNumber(record.initial_profile.dam_calc_ms) << ','
+          << LocalFormatCsvNumber(record.initial_profile.cost_sum_calc_ms) << ','
+          << LocalFormatCsvNumber(ga_ocp::RuntimeProfilerModelTimeMs(record.initial_profile)) << ','
+          << LocalFormatCsvNumber(record.cycle_time_ms) << ','
+          << LocalFormatCsvNumber(record.realtime_ratio) << ','
           << record.iterations << ','
           << record.converged << ','
           << record.failed << ','
-          << FormatCsvNumber(record.best_cost) << ','
-          << FormatCsvNumber(record.final_stop) << ','
-          << FormatCsvNumber(plant_mass_scale_) << ','
-          << FormatCsvNumber(plant_payload_mass_) << ','
-          << FormatCsvNumber(controller_payload_mass_) << ','
+          << LocalFormatCsvNumber(record.best_cost) << ','
+          << LocalFormatCsvNumber(record.final_stop) << ','
+          << LocalFormatCsvNumber(plant_mass_scale_) << ','
+          << LocalFormatCsvNumber(plant_payload_mass_) << ','
+          << LocalFormatCsvNumber(controller_payload_mass_) << ','
           << (model_payload_ ? 1 : 0) << ','
-          << CsvEscape(record.failure_message) << ','
-          << CsvEscape(record.q) << ','
-          << CsvEscape(record.dq) << ','
-          << CsvEscape(record.q_ref) << ','
-          << CsvEscape(record.dq_ref) << ','
-          << CsvEscape(record.q_cmd) << ','
-          << CsvEscape(record.dq_cmd) << ','
-          << CsvEscape(record.u_cmd) << ','
-          << CsvEscape(record.effort) << '\n';
+          << LocalCsvEscape(FormatVector(plant_payload_com_attachment_)) << ','
+          << LocalCsvEscape(FormatVector(payload_com_attachment_)) << ','
+          << LocalCsvEscape(FormatVector(payload_com_attachment_)) << ','
+          << LocalCsvEscape(external_force_body_name_) << ','
+          << LocalFormatCsvNumber(external_force_start_s_) << ','
+          << LocalFormatCsvNumber(external_force_duration_s_) << ','
+          << LocalCsvEscape(FormatVector(external_force_)) << ','
+          << LocalCsvEscape(FormatVector(external_torque_)) << ','
+          << LocalCsvEscape(record.failure_message) << ','
+          << LocalCsvEscape(record.q) << ','
+          << LocalCsvEscape(record.dq) << ','
+          << LocalCsvEscape(record.q_ref) << ','
+          << LocalCsvEscape(record.dq_ref) << ','
+          << LocalCsvEscape(record.q_cmd) << ','
+          << LocalCsvEscape(record.dq_cmd) << ','
+          << LocalCsvEscape(record.ddq_cmd) << ','
+          << LocalCsvEscape(record.u_cmd) << ','
+          << LocalCsvEscape(record.effort) << '\n';
     }
   }
 
   void writeSummaryCsv() const {
     std::vector<double> tracking_errors;
     std::vector<double> torque_ratios;
+    std::vector<double> command_torque_ratios;
     std::vector<double> solve_times;
+    std::vector<double> reference_build_times;
+    std::vector<double> problem_build_times;
+    std::vector<double> warm_start_times;
+    std::vector<double> initial_calc_times;
+    std::vector<double> solver_setup_times;
+    std::vector<double> mpc_pipeline_times;
+    std::vector<double> publish_command_times;
+    std::vector<double> solver_dam_calc_times;
+    std::vector<double> solver_dam_calcdiff_times;
+    std::vector<double> solver_dynamics_calc_times;
+    std::vector<double> solver_dynamics_calcdiff_times;
+    std::vector<double> solver_cost_sum_calc_times;
+    std::vector<double> solver_cost_sum_calcdiff_times;
+    std::vector<double> solver_cost_item_total_times;
+    std::vector<double> solver_collision_cost_total_times;
+    std::vector<double> solver_collision_residual_total_times;
+    std::vector<double> solver_model_total_times;
+    std::vector<double> solver_overhead_times;
+    std::vector<double> initial_model_total_times;
     std::vector<double> realtime_ratios;
     std::size_t deadline_miss_count = 0;
     std::size_t failure_count = 0;
 
     tracking_errors.reserve(cycle_records_.size());
     torque_ratios.reserve(cycle_records_.size());
+    command_torque_ratios.reserve(cycle_records_.size());
     solve_times.reserve(cycle_records_.size());
+    reference_build_times.reserve(cycle_records_.size());
+    problem_build_times.reserve(cycle_records_.size());
+    warm_start_times.reserve(cycle_records_.size());
+    initial_calc_times.reserve(cycle_records_.size());
+    solver_setup_times.reserve(cycle_records_.size());
+    mpc_pipeline_times.reserve(cycle_records_.size());
+    publish_command_times.reserve(cycle_records_.size());
+    solver_dam_calc_times.reserve(cycle_records_.size());
+    solver_dam_calcdiff_times.reserve(cycle_records_.size());
+    solver_dynamics_calc_times.reserve(cycle_records_.size());
+    solver_dynamics_calcdiff_times.reserve(cycle_records_.size());
+    solver_cost_sum_calc_times.reserve(cycle_records_.size());
+    solver_cost_sum_calcdiff_times.reserve(cycle_records_.size());
+    solver_cost_item_total_times.reserve(cycle_records_.size());
+    solver_collision_cost_total_times.reserve(cycle_records_.size());
+    solver_collision_residual_total_times.reserve(cycle_records_.size());
+    solver_model_total_times.reserve(cycle_records_.size());
+    solver_overhead_times.reserve(cycle_records_.size());
+    initial_model_total_times.reserve(cycle_records_.size());
     realtime_ratios.reserve(cycle_records_.size());
 
     for (const CycleRecord& record : cycle_records_) {
       tracking_errors.push_back(record.tracking_error);
       torque_ratios.push_back(record.torque_ratio);
+      command_torque_ratios.push_back(record.command_torque_ratio);
       solve_times.push_back(record.solve_time_ms);
+      reference_build_times.push_back(record.reference_build_ms);
+      problem_build_times.push_back(record.problem_build_ms);
+      warm_start_times.push_back(record.warm_start_ms);
+      initial_calc_times.push_back(record.initial_calc_ms);
+      solver_setup_times.push_back(record.solver_setup_ms);
+      mpc_pipeline_times.push_back(record.mpc_pipeline_time_ms);
+      publish_command_times.push_back(record.publish_command_ms);
+      solver_dam_calc_times.push_back(record.solver_profile.dam_calc_ms);
+      solver_dam_calcdiff_times.push_back(record.solver_profile.dam_calcdiff_ms);
+      solver_dynamics_calc_times.push_back(record.solver_profile.dynamics_calc_ms);
+      solver_dynamics_calcdiff_times.push_back(record.solver_profile.dynamics_calcdiff_ms);
+      solver_cost_sum_calc_times.push_back(record.solver_profile.cost_sum_calc_ms);
+      solver_cost_sum_calcdiff_times.push_back(record.solver_profile.cost_sum_calcdiff_ms);
+      solver_cost_item_total_times.push_back(RuntimeCostItemTotalMs(record.solver_profile));
+      solver_collision_cost_total_times.push_back(
+          RuntimeCostItemTotalMs(record.solver_profile, ga_ocp::RuntimeCostCategory::kCollision));
+      solver_collision_residual_total_times.push_back(
+          record.solver_profile.collision_residual_calc_ms +
+          record.solver_profile.collision_residual_calcdiff_ms);
+      const double model_total_ms = ga_ocp::RuntimeProfilerModelTimeMs(record.solver_profile);
+      solver_model_total_times.push_back(model_total_ms);
+      solver_overhead_times.push_back(record.solve_time_ms - model_total_ms);
+      initial_model_total_times.push_back(
+          ga_ocp::RuntimeProfilerModelTimeMs(record.initial_profile));
       realtime_ratios.push_back(record.realtime_ratio);
       deadline_miss_count += record.solve_time_ms > (1e3 / std::max(control_rate_hz_, 1.0)) ? 1u : 0u;
       failure_count += static_cast<std::size_t>(record.failed);
@@ -1037,45 +1416,121 @@ class ClosedLoopMpcNode : public rclcpp::Node {
 
     std::ofstream out(output_prefix_.string() + "_summary.csv");
     out << "robot,backend,num_cycles,tracking_rmse,tracking_mean,tracking_p95,torque_ratio_mean,"
-           "torque_ratio_p95,torque_ratio_max,solve_time_mean_ms,solve_time_p95_ms,"
-           "realtime_ratio_mean,deadline_miss_rate,failure_rate,dt,horizon,solve_budget_ms,"
+           "torque_ratio_p95,torque_ratio_max,command_torque_ratio_mean,"
+           "command_torque_ratio_p95,command_torque_ratio_max,solve_time_mean_ms,solve_time_p95_ms,"
+           "reference_build_mean_ms,reference_build_p95_ms,problem_build_mean_ms,problem_build_p95_ms,"
+           "warm_start_mean_ms,warm_start_p95_ms,initial_calc_mean_ms,initial_calc_p95_ms,"
+           "solver_setup_mean_ms,solver_setup_p95_ms,mpc_pipeline_mean_ms,mpc_pipeline_p95_ms,"
+           "publish_command_mean_ms,publish_command_p95_ms,"
+           "solver_dam_calc_mean_ms,solver_dam_calc_p95_ms,"
+           "solver_dam_calcdiff_mean_ms,solver_dam_calcdiff_p95_ms,"
+           "solver_dynamics_calc_mean_ms,solver_dynamics_calc_p95_ms,"
+           "solver_dynamics_calcdiff_mean_ms,solver_dynamics_calcdiff_p95_ms,"
+           "solver_cost_sum_calc_mean_ms,solver_cost_sum_calc_p95_ms,"
+           "solver_cost_sum_calcdiff_mean_ms,solver_cost_sum_calcdiff_p95_ms,"
+           "solver_cost_item_total_mean_ms,solver_cost_item_total_p95_ms,"
+           "solver_collision_cost_total_mean_ms,solver_collision_cost_total_p95_ms,"
+           "solver_collision_residual_total_mean_ms,solver_collision_residual_total_p95_ms,"
+           "solver_model_total_mean_ms,solver_model_total_p95_ms,"
+           "solver_overhead_mean_ms,solver_overhead_p95_ms,"
+           "initial_model_total_mean_ms,initial_model_total_p95_ms,"
+           "enable_collision_cost,collision_obstacle_count,collision_weight,collision_safety_distance,"
+           "acceleration_weight,realtime_ratio_mean,deadline_miss_rate,failure_rate,dt,horizon,solve_budget_ms,"
            "control_rate_hz,experiment_duration_s,plant_mass_scale,plant_payload_mass,"
-           "controller_payload_mass,model_payload,payload_com_attachment\n";
-    out << CsvEscape(robot_config_.robot) << ','
-        << CsvEscape(BackendName(backend_)) << ','
+           "controller_payload_mass,model_payload,plant_payload_com,controller_payload_com,"
+           "payload_com_attachment,external_force_body_name,external_force_start_s,"
+           "external_force_duration_s,external_force,external_torque\n";
+    out << LocalCsvEscape(robot_config_.robot) << ','
+        << LocalCsvEscape(BackendName(backend_)) << ','
         << cycle_records_.size() << ','
-        << FormatCsvNumber(tracking_rmse) << ','
-        << FormatCsvNumber(Mean(tracking_errors)) << ','
-        << FormatCsvNumber(Percentile(tracking_errors, 0.95)) << ','
-        << FormatCsvNumber(Mean(torque_ratios)) << ','
-        << FormatCsvNumber(Percentile(torque_ratios, 0.95)) << ','
-        << FormatCsvNumber(torque_ratios.empty()
+        << LocalFormatCsvNumber(tracking_rmse) << ','
+        << LocalFormatCsvNumber(Mean(tracking_errors)) << ','
+        << LocalFormatCsvNumber(Percentile(tracking_errors, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(torque_ratios)) << ','
+        << LocalFormatCsvNumber(Percentile(torque_ratios, 0.95)) << ','
+        << LocalFormatCsvNumber(torque_ratios.empty()
                                ? 0.0
                                : *std::max_element(torque_ratios.begin(), torque_ratios.end()))
         << ','
-        << FormatCsvNumber(Mean(solve_times)) << ','
-        << FormatCsvNumber(Percentile(solve_times, 0.95)) << ','
-        << FormatCsvNumber(Mean(realtime_ratios)) << ','
-        << FormatCsvNumber(cycle_records_.empty()
+        << LocalFormatCsvNumber(Mean(command_torque_ratios)) << ','
+        << LocalFormatCsvNumber(Percentile(command_torque_ratios, 0.95)) << ','
+        << LocalFormatCsvNumber(command_torque_ratios.empty()
+                               ? 0.0
+                               : *std::max_element(command_torque_ratios.begin(), command_torque_ratios.end()))
+        << ','
+        << LocalFormatCsvNumber(Mean(solve_times)) << ','
+        << LocalFormatCsvNumber(Percentile(solve_times, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(reference_build_times)) << ','
+        << LocalFormatCsvNumber(Percentile(reference_build_times, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(problem_build_times)) << ','
+        << LocalFormatCsvNumber(Percentile(problem_build_times, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(warm_start_times)) << ','
+        << LocalFormatCsvNumber(Percentile(warm_start_times, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(initial_calc_times)) << ','
+        << LocalFormatCsvNumber(Percentile(initial_calc_times, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(solver_setup_times)) << ','
+        << LocalFormatCsvNumber(Percentile(solver_setup_times, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(mpc_pipeline_times)) << ','
+        << LocalFormatCsvNumber(Percentile(mpc_pipeline_times, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(publish_command_times)) << ','
+        << LocalFormatCsvNumber(Percentile(publish_command_times, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(solver_dam_calc_times)) << ','
+        << LocalFormatCsvNumber(Percentile(solver_dam_calc_times, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(solver_dam_calcdiff_times)) << ','
+        << LocalFormatCsvNumber(Percentile(solver_dam_calcdiff_times, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(solver_dynamics_calc_times)) << ','
+        << LocalFormatCsvNumber(Percentile(solver_dynamics_calc_times, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(solver_dynamics_calcdiff_times)) << ','
+        << LocalFormatCsvNumber(Percentile(solver_dynamics_calcdiff_times, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(solver_cost_sum_calc_times)) << ','
+        << LocalFormatCsvNumber(Percentile(solver_cost_sum_calc_times, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(solver_cost_sum_calcdiff_times)) << ','
+        << LocalFormatCsvNumber(Percentile(solver_cost_sum_calcdiff_times, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(solver_cost_item_total_times)) << ','
+        << LocalFormatCsvNumber(Percentile(solver_cost_item_total_times, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(solver_collision_cost_total_times)) << ','
+        << LocalFormatCsvNumber(Percentile(solver_collision_cost_total_times, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(solver_collision_residual_total_times)) << ','
+        << LocalFormatCsvNumber(Percentile(solver_collision_residual_total_times, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(solver_model_total_times)) << ','
+        << LocalFormatCsvNumber(Percentile(solver_model_total_times, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(solver_overhead_times)) << ','
+        << LocalFormatCsvNumber(Percentile(solver_overhead_times, 0.95)) << ','
+        << LocalFormatCsvNumber(Mean(initial_model_total_times)) << ','
+        << LocalFormatCsvNumber(Percentile(initial_model_total_times, 0.95)) << ','
+        << (enable_collision_cost_ ? 1 : 0) << ','
+        << collision_obstacle_count_ << ','
+        << LocalFormatCsvNumber(collision_weight_) << ','
+        << LocalFormatCsvNumber(collision_safety_distance_) << ','
+        << LocalFormatCsvNumber(acceleration_weight_) << ','
+        << LocalFormatCsvNumber(Mean(realtime_ratios)) << ','
+        << LocalFormatCsvNumber(cycle_records_.empty()
                                ? 0.0
                                : static_cast<double>(deadline_miss_count) /
                                      static_cast<double>(cycle_records_.size()))
         << ','
-        << FormatCsvNumber(cycle_records_.empty()
+        << LocalFormatCsvNumber(cycle_records_.empty()
                                ? 0.0
                                : static_cast<double>(failure_count) /
                                      static_cast<double>(cycle_records_.size()))
         << ','
-        << FormatCsvNumber(dt_) << ','
+        << LocalFormatCsvNumber(dt_) << ','
         << horizon_ << ','
-        << FormatCsvNumber(solve_budget_ms_) << ','
-        << FormatCsvNumber(control_rate_hz_) << ','
-        << FormatCsvNumber(experiment_duration_s_) << ','
-        << FormatCsvNumber(plant_mass_scale_) << ','
-        << FormatCsvNumber(plant_payload_mass_) << ','
-        << FormatCsvNumber(controller_payload_mass_) << ','
+        << LocalFormatCsvNumber(solve_budget_ms_) << ','
+        << LocalFormatCsvNumber(control_rate_hz_) << ','
+        << LocalFormatCsvNumber(experiment_duration_s_) << ','
+        << LocalFormatCsvNumber(plant_mass_scale_) << ','
+        << LocalFormatCsvNumber(plant_payload_mass_) << ','
+        << LocalFormatCsvNumber(controller_payload_mass_) << ','
         << (model_payload_ ? 1 : 0) << ','
-        << CsvEscape(FormatVector(payload_com_attachment_)) << '\n';
+        << LocalCsvEscape(FormatVector(plant_payload_com_attachment_)) << ','
+        << LocalCsvEscape(FormatVector(payload_com_attachment_)) << ','
+        << LocalCsvEscape(FormatVector(payload_com_attachment_)) << ','
+        << LocalCsvEscape(external_force_body_name_) << ','
+        << LocalFormatCsvNumber(external_force_start_s_) << ','
+        << LocalFormatCsvNumber(external_force_duration_s_) << ','
+        << LocalCsvEscape(FormatVector(external_force_)) << ','
+        << LocalCsvEscape(FormatVector(external_torque_)) << '\n';
   }
 
   void finishExperiment() {
@@ -1120,8 +1575,14 @@ class ClosedLoopMpcNode : public rclcpp::Node {
   double state_running_weight_{6.0};
   double state_terminal_weight_{80.0};
   double control_weight_{1e-3};
+  double acceleration_weight_{0.0};
   double velocity_limit_weight_{20.0};
   double velocity_limit_scale_{0.9};
+  bool enable_runtime_profiler_{true};
+  bool enable_collision_cost_{false};
+  double collision_weight_{50.0};
+  double collision_safety_distance_{0.08};
+  int collision_obstacle_count_{4};
 
   double reference_frequency_hz_{0.12};
   double reference_secondary_ratio_{0.5};
@@ -1132,7 +1593,13 @@ class ClosedLoopMpcNode : public rclcpp::Node {
   double plant_payload_mass_{0.0};
   double controller_payload_mass_{0.0};
   bool model_payload_{false};
+  Eigen::Vector3d plant_payload_com_attachment_{Eigen::Vector3d::Zero()};
   Eigen::Vector3d payload_com_attachment_{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d external_force_{Eigen::Vector3d::Zero()};
+  Eigen::Vector3d external_torque_{Eigen::Vector3d::Zero()};
+  std::string external_force_body_name_{"wrist_3_link"};
+  double external_force_start_s_{-1.0};
+  double external_force_duration_s_{0.0};
 
   Eigen::VectorXd reference_amplitudes_;
   Eigen::VectorXd effort_limit_;

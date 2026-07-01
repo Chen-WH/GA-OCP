@@ -11,7 +11,7 @@ from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description() -> LaunchDescription:
     ros2_share = get_package_share_directory('ga_ocp_ros2')
-    config = f"{ros2_share}/config/closed_loop_mpc_leap.yaml"
+    config = f"{ros2_share}/config/closed_loop_mpc_tidybot.yaml"
 
     backend = LaunchConfiguration('backend')
     solve_budget_ms = LaunchConfiguration('solve_budget_ms')
@@ -52,7 +52,7 @@ def generate_launch_description() -> LaunchDescription:
         output='screen',
         parameters=[
             {
-                'robot': 'leap_left',
+                'robot': 'stanford_tidybot',
                 'enable_viewer': ParameterValue(enable_viewer, value_type=bool),
             }
         ],
@@ -61,7 +61,7 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription([
         DeclareLaunchArgument('backend', default_value='tetrapga'),
         DeclareLaunchArgument('acceleration_weight', default_value='0.0'),
-        DeclareLaunchArgument('solve_budget_ms', default_value='8.0'),
+        DeclareLaunchArgument('solve_budget_ms', default_value='10.0'),
         DeclareLaunchArgument('enforce_solve_budget', default_value='true'),
         DeclareLaunchArgument('duration_s', default_value='20.0'),
         DeclareLaunchArgument('dt', default_value='0.02'),

@@ -32,6 +32,7 @@ enum class ScenarioKind {
   kUR10,
   kLeapHand,
   kBinaryTree,
+  kStanfordTidyBot,
   kBinaryTree31Dof,
 };
 
@@ -105,6 +106,8 @@ std::string ScenarioName(const ScenarioKind scenario) {
       return "leap_hand";
     case ScenarioKind::kBinaryTree:
       return "binary_tree";
+    case ScenarioKind::kStanfordTidyBot:
+      return "stanford_tidybot";
     case ScenarioKind::kBinaryTree31Dof:
       return "binary_tree_31dof";
   }
@@ -194,6 +197,9 @@ ScenarioKind ParseScenario(const std::string& value) {
   if (value == "binary_tree" || value == "tree") {
     return ScenarioKind::kBinaryTree;
   }
+  if (value == "stanford_tidybot" || value == "tidybot") {
+    return ScenarioKind::kStanfordTidyBot;
+  }
   if (value == "binary_tree_31dof" || value == "bt31" || value == "tree31") {
     return ScenarioKind::kBinaryTree31Dof;
   }
@@ -207,7 +213,7 @@ CliConfig ParseCli(int argc, char** argv) {
     if (arg == "--help" || arg == "-h") {
       std::cout
           << "Usage: Crocoddyl_fddp_budget_bench [options]\n"
-          << "  --scenario=ur10|leap_hand|binary_tree|binary_tree_31dof\n"
+          << "  --scenario=ur10|leap_hand|stanford_tidybot|binary_tree|binary_tree_31dof\n"
           << "  --level=<int>                  binary-tree level, DOF=(2^level-1)\n"
           << "  --branching_factor=<int>\n"
           << "  --samples=<int>\n"
@@ -293,6 +299,10 @@ std::filesystem::path PackageRoot() {
   return std::filesystem::path(__FILE__).parent_path().parent_path();
 }
 
+std::filesystem::path RobotAssetsRoot() {
+  return std::filesystem::path(GA_OCP_ROBOT_ASSETS_DIR);
+}
+
 std::string DefaultOutputPrefix(const CliConfig& config) {
   const std::filesystem::path log_dir = PackageRoot() / "log";
   std::filesystem::create_directories(log_dir);
@@ -315,20 +325,31 @@ std::vector<MethodKind> AvailableMethods() {
 }
 
 pinocchio::Model BuildUr10PinModel() {
-  const std::filesystem::path urdf_path = PackageRoot() / "robot-assets" / "ur10" / "urdf" / "ur10.urdf";
+  const std::filesystem::path urdf_path = RobotAssetsRoot() / "ur10" / "urdf" / "ur10.urdf";
   pinocchio::Model pin_model;
   pinocchio::urdf::buildModel(urdf_path.string(), pin_model);
   return pin_model;
 }
 
 std::filesystem::path LeapHandUrdfPath() {
-  return PackageRoot() / "robot-assets" / "leap_hand" / "urdf" / "leap_hand_left.urdf";
+  return RobotAssetsRoot() / "leap_hand" / "urdf" / "leap_hand_left.urdf";
 }
 
 pinocchio::Model BuildLeapHandPinModel() {
   const std::filesystem::path urdf_path = LeapHandUrdfPath();
   pinocchio::Model pin_model;
   pinocchio::urdf::buildModel(urdf_path.string(), pin_model);
+  return pin_model;
+}
+
+std::filesystem::path StanfordTidyBotUrdfPath() {
+  return RobotAssetsRoot() / "stanford_tidybot" / "urdf" /
+         "tidybot_gen3_10dof.urdf";
+}
+
+pinocchio::Model BuildStanfordTidyBotPinModel() {
+  pinocchio::Model pin_model;
+  pinocchio::urdf::buildModel(StanfordTidyBotUrdfPath().string(), pin_model);
   return pin_model;
 }
 
@@ -356,6 +377,18 @@ ScenarioContext BuildScenarioContext(const CliConfig& config) {
 #ifdef GA_OCP_HAS_CASADI_BENCH
     context.casadi_autodiff =
         std::make_shared<InlineAutoDiffABADerivatives>(context.pin_model, "tetrapga_budget_leap_hand");
+#endif
+    return context;
+  }
+
+  if (config.scenario == ScenarioKind::kStanfordTidyBot) {
+    const std::string urdf_path = StanfordTidyBotUrdfPath().string();
+    context.ga_model = std::make_shared<Model<double>>(urdf_path);
+    context.pin_model = BuildStanfordTidyBotPinModel();
+    context.dof = context.ga_model->dof_a;
+#ifdef GA_OCP_HAS_CASADI_BENCH
+    context.casadi_autodiff = std::make_shared<InlineAutoDiffABADerivatives>(
+        context.pin_model, "tetrapga_budget_stanford_tidybot");
 #endif
     return context;
   }

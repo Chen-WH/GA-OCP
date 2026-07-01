@@ -12,7 +12,7 @@ using DurationSeconds = std::chrono::duration<double>;
 
 constexpr int kMinLevel = 1;
 constexpr int kMaxLevel = 7;
-constexpr int kMaxLevel_AD = 5;
+constexpr int kMaxLevel_AD = 7;
 constexpr int kSampleBatchSize = 10;
 constexpr int kBenchmarkIterations = 10;
 
@@ -149,36 +149,36 @@ void RunPinocchioCasadiIDMPCSQPBenchmark(benchmark::State& state, int bf) {
 #endif
 
 void RegisterAll() {
-  benchmark::RegisterBenchmark("binary_tree/TetraPGA/MimSQP/FwdDynamics",
+  benchmark::RegisterBenchmark("serial_chain/TetraPGA/MimSQP/FwdDynamics",
                                [](benchmark::State& s) {
-    RunGAFwdDynSQPBenchmark(s, 2);
+    RunGAFwdDynSQPBenchmark(s, 1);
   })->DenseRange(kMinLevel, kMaxLevel, 1)->Iterations(kBenchmarkIterations);
 
-  benchmark::RegisterBenchmark("binary_tree/Pinocchio/MimSQP/FwdDynamics",
+  benchmark::RegisterBenchmark("serial_chain/Pinocchio/MimSQP/FwdDynamics",
                                [](benchmark::State& s) {
-    RunPinocchioFwdDynSQPBenchmark(s, 2);
+    RunPinocchioFwdDynSQPBenchmark(s, 1);
   })->DenseRange(kMinLevel, kMaxLevel, 1)->Iterations(kBenchmarkIterations);
 
 #ifdef GA_OCP_HAS_CASADI_BENCH
-  benchmark::RegisterBenchmark("binary_tree/CasADi/MimSQP/FwdDynamics",
+  benchmark::RegisterBenchmark("serial_chain/CasADi/MimSQP/FwdDynamics",
                                [](benchmark::State& s) {
-    RunPinocchioCasadiFwdDynSQPBenchmark(s, 2);
+    RunPinocchioCasadiFwdDynSQPBenchmark(s, 1);
   })->DenseRange(kMinLevel, kMaxLevel_AD, 1)->Iterations(kBenchmarkIterations);
 #endif
 
-  benchmark::RegisterBenchmark("binary_tree/TetraPGA/MimSQP/IDMPC", [](benchmark::State& s) {
-    RunGAIDMPCSQPBenchmark(s, 2);
+  benchmark::RegisterBenchmark("serial_chain/TetraPGA/MimSQP/IDMPC", [](benchmark::State& s) {
+    RunGAIDMPCSQPBenchmark(s, 1);
   })->DenseRange(kMinLevel, kMaxLevel, 1)->Iterations(kBenchmarkIterations);
 
-  benchmark::RegisterBenchmark("binary_tree/Pinocchio/MimSQP/IDMPC",
+  benchmark::RegisterBenchmark("serial_chain/Pinocchio/MimSQP/IDMPC",
                                [](benchmark::State& s) {
-    RunPinocchioIDMPCSQPBenchmark(s, 2);
+    RunPinocchioIDMPCSQPBenchmark(s, 1);
   })->DenseRange(kMinLevel, kMaxLevel, 1)->Iterations(kBenchmarkIterations);
 
 #ifdef GA_OCP_HAS_CASADI_BENCH
-  benchmark::RegisterBenchmark("binary_tree/CasADi/MimSQP/IDMPC",
+  benchmark::RegisterBenchmark("serial_chain/CasADi/MimSQP/IDMPC",
                                [](benchmark::State& s) {
-    RunPinocchioCasadiIDMPCSQPBenchmark(s, 2);
+    RunPinocchioCasadiIDMPCSQPBenchmark(s, 1);
   })->DenseRange(kMinLevel, kMaxLevel_AD, 1)->Iterations(kBenchmarkIterations);
 #endif
 }

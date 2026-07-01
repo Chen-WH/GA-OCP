@@ -491,9 +491,16 @@ inline pinocchio::Model BuildPinModel(const TreeTemplateParams& params) {
   model.gravity.angular().setZero();
 
   const int n = params.dof;
+  // Pinocchio's data checks assume every subtree has a contiguous joint-index range.
+  std::vector<std::vector<int>> children(static_cast<std::size_t>(n + 1));
+  for (int i = 1; i <= n; ++i) {
+    const int parent_body = params.parent_indices[static_cast<std::size_t>(i)];
+    children[static_cast<std::size_t>(parent_body)].push_back(i);
+  }
+
   std::vector<pinocchio::JointIndex> joint_ids(static_cast<std::size_t>(n + 1), 0);
 
-  for (int i = 1; i <= n; ++i) {
+  auto add_joint_preorder = [&](auto&& self, int i) -> void {
     const int parent_body = params.parent_indices[static_cast<std::size_t>(i)];
     const pinocchio::JointIndex parent_joint = joint_ids[static_cast<std::size_t>(parent_body)];
 
@@ -518,6 +525,14 @@ inline pinocchio::Model BuildPinModel(const TreeTemplateParams& params) {
     model.appendBodyToJoint(jid, pinocchio::Inertia(m, c, I), pinocchio::SE3::Identity());
 
     joint_ids[static_cast<std::size_t>(i)] = jid;
+
+    for (const int child : children[static_cast<std::size_t>(i)]) {
+      self(self, child);
+    }
+  };
+
+  for (const int root_child : children[0]) {
+    add_joint_preorder(add_joint_preorder, root_child);
   }
 
   return model;
@@ -1140,6 +1155,4 @@ inline std::shared_ptr<crocoddyl::ShootingProblem> BuildPinCasadiIDMPCProblem(
                                                                               running_model);
   return std::make_shared<crocoddyl::ShootingProblem>(x0, running_models, terminal_model);
 }
-#endif
-
 #endif

@@ -13,7 +13,7 @@ add_compile_definitions(COAL_DISABLE_HPP_FCL_WARNINGS)
 
 # Release configuration
 set(CMAKE_BUILD_TYPE "Release")
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall -g")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG -Wall -g")
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -103,7 +103,12 @@ endif()
 if(GA_OCP_BUILD_BENCHMARKS)
     ga_ocp_add_benchmark(Crocoddyl_fddp_bench benchmark/Crocoddyl_fddp_bench.cpp)
     ga_ocp_add_benchmark(Crocoddyl_fddp_budget_bench benchmark/Crocoddyl_fddp_budget_bench.cpp)
+    ga_ocp_add_benchmark(Crocoddyl_runtime_breakdown benchmark/Crocoddyl_runtime_breakdown.cpp)
+    target_compile_definitions(Crocoddyl_runtime_breakdown PRIVATE NDEBUG)
+    target_compile_options(Crocoddyl_runtime_breakdown PRIVATE -O3)
     ga_ocp_add_benchmark(Crocoddyl_sqp_bench benchmark/Crocoddyl_sqp_bench.cpp)
+    ga_ocp_add_benchmark(Crocoddyl_obstacle_margin_sweep benchmark/Crocoddyl_obstacle_margin_sweep.cpp)
+    ga_ocp_add_benchmark(Crocoddyl_robustness_sweep benchmark/Crocoddyl_robustness_sweep.cpp)
     target_link_libraries(Crocoddyl_sqp_bench mim_solvers::mim_solvers)
 endif()
 
@@ -125,6 +130,7 @@ set(GA_OCP_ROBOT_ASSET_PACKAGES
     realsense_d435i
     reorientation_cube
     robotiq_2f85
+    stanford_tidybot
     ur10)
 
 foreach(_ga_ocp_robot_asset IN LISTS GA_OCP_ROBOT_ASSET_PACKAGES)

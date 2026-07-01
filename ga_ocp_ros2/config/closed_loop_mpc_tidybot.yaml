@@ -1,0 +1,25 @@
+closed_loop_mpc_node:
+  ros__parameters:
+    robot: stanford_tidybot
+    backend: tetrapga
+    dt: 0.02
+    horizon: 20
+    max_iterations: 80
+    solve_budget_ms: 10.0
+    control_rate_hz: 50.0
+    experiment_duration_s: 20.0
+    stop_tol: 1.0e-7
+    use_warm_start: true
+    auto_start: true
+    shutdown_on_finish: true
+    state_running_weight: 8.0
+    state_terminal_weight: 120.0
+    control_weight: 0.0005
+    velocity_limit_weight: 20.0
+    velocity_limit_scale: 0.9
+    reference_frequency_hz: 0.08
+    reference_secondary_ratio: 0.45
+    reference_amplitude_scale: 0.95
+    reference_ramp_duration_s: 1.5
+    reference_amplitudes:
+      [0.18, 0.18, 0.25, 0.24, 0.18, 0.24, 0.16, 0.20, 0.14, 0.18]

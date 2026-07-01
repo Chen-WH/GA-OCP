@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import signal
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -10,6 +11,7 @@ import rclpy
 from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
+from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectory
 
 
@@ -29,6 +31,31 @@ class RobotConfig:
 
 def _array(values: List[float]) -> np.ndarray:
     return np.asarray(values, dtype=float)
+
+
+_PARAM_SENTINEL = 1.0e100
+
+
+def _vector3_from_params(
+    node: Node,
+    vector_name: str,
+    scalar_prefix: str,
+    default: List[float],
+) -> np.ndarray:
+    value = np.asarray(node.declare_parameter(vector_name, default).value, dtype=float)
+    if value.shape != (3,):
+        raise ValueError(f'{vector_name} must contain exactly 3 values.')
+
+    scalar_values = [
+        float(node.declare_parameter(f'{scalar_prefix}_{axis}', _PARAM_SENTINEL).value)
+        for axis in ('x', 'y', 'z')
+    ]
+    scalar_set = [abs(v) < 0.5 * _PARAM_SENTINEL for v in scalar_values]
+    if any(scalar_set):
+        if not all(scalar_set):
+            raise ValueError(f'{scalar_prefix}_x/y/z must be set together.')
+        value = np.asarray(scalar_values, dtype=float)
+    return value
 
 
 ROBOT_CONFIGS: Dict[str, RobotConfig] = {
@@ -93,6 +120,104 @@ ROBOT_CONFIGS: Dict[str, RobotConfig] = {
         kd=np.zeros(16, dtype=float),
         effort_limit=np.full(16, np.inf, dtype=float),
     ),
+    'stanford_tidybot': RobotConfig(
+        robot='stanford_tidybot',
+        scene_relative_path='robot-assets/stanford_tidybot/mjcf/scene.xml',
+        joint_state_names=[
+            'base_x_joint',
+            'base_y_joint',
+            'base_yaw_joint',
+            'joint_1',
+            'joint_2',
+            'joint_3',
+            'joint_4',
+            'joint_5',
+            'joint_6',
+            'joint_7',
+        ],
+        mujoco_joint_names=[
+            'joint_x',
+            'joint_y',
+            'joint_th',
+            'joint_1',
+            'joint_2',
+            'joint_3',
+            'joint_4',
+            'joint_5',
+            'joint_6',
+            'joint_7',
+        ],
+        actuator_names=[
+            'joint_x',
+            'joint_y',
+            'joint_th',
+            'joint_1',
+            'joint_2',
+            'joint_3',
+            'joint_4',
+            'joint_5',
+            'joint_6',
+            'joint_7',
+        ],
+        default_target=_array([
+            0.0, 0.0, 0.0,
+            0.0, 0.26179939, 3.14159265, -2.26892803,
+            0.0, 0.95993109, 1.57079633,
+        ]),
+        control_mode='direct',
+        kp=np.zeros(10, dtype=float),
+        kd=np.zeros(10, dtype=float),
+        effort_limit=_array([1000.0, 1000.0, 1000.0, 39.0, 39.0, 39.0, 39.0, 9.0, 9.0, 9.0]),
+    ),
+    'tidybot': RobotConfig(
+        robot='stanford_tidybot',
+        scene_relative_path='robot-assets/stanford_tidybot/mjcf/scene.xml',
+        joint_state_names=[
+            'base_x_joint',
+            'base_y_joint',
+            'base_yaw_joint',
+            'joint_1',
+            'joint_2',
+            'joint_3',
+            'joint_4',
+            'joint_5',
+            'joint_6',
+            'joint_7',
+        ],
+        mujoco_joint_names=[
+            'joint_x',
+            'joint_y',
+            'joint_th',
+            'joint_1',
+            'joint_2',
+            'joint_3',
+            'joint_4',
+            'joint_5',
+            'joint_6',
+            'joint_7',
+        ],
+        actuator_names=[
+            'joint_x',
+            'joint_y',
+            'joint_th',
+            'joint_1',
+            'joint_2',
+            'joint_3',
+            'joint_4',
+            'joint_5',
+            'joint_6',
+            'joint_7',
+        ],
+        default_target=_array([
+            0.0, 0.0, 0.0,
+            0.0, 0.26179939, 3.14159265, -2.26892803,
+            0.0, 0.95993109, 1.57079633,
+        ]),
+        control_mode='direct',
+        kp=np.zeros(10, dtype=float),
+        kd=np.zeros(10, dtype=float),
+        effort_limit=_array([1000.0, 1000.0, 1000.0, 39.0, 39.0, 39.0, 39.0, 9.0, 9.0, 9.0]),
+    ),
 }
 
 
@@ -112,11 +237,28 @@ class MujocoJointExecutor(Node):
         self.mass_scale = float(self.declare_parameter('mass_scale', 1.0).value)
         self.payload_mass = float(self.declare_parameter('payload_mass', 0.0).value)
         self.payload_body_name = str(self.declare_parameter('payload_body_name', 'attachment').value)
-        self.payload_com = np.asarray(
-            self.declare_parameter('payload_com', [0.0, 0.0, 0.05]).value, dtype=float
+        self.payload_com = _vector3_from_params(
+            self, 'payload_com', 'payload_com', [0.0, 0.0, 0.05]
         )
-        if self.payload_com.shape != (3,):
-            raise ValueError('payload_com must contain exactly 3 values.')
+        self.link_com_offset = _vector3_from_params(
+            self, 'link_com_offset', 'link_com_offset', [0.0, 0.0, 0.0]
+        )
+        self.enable_viewer = bool(self.declare_parameter('enable_viewer', True).value)
+        self.external_force_body_name = str(
+            self.declare_parameter('external_force_body_name', 'wrist_3_link').value
+        )
+        self.external_force_start_s = float(
+            self.declare_parameter('external_force_start_s', -1.0).value
+        )
+        self.external_force_duration_s = float(
+            self.declare_parameter('external_force_duration_s', 0.0).value
+        )
+        self.external_force = _vector3_from_params(
+            self, 'external_force', 'external_force', [0.0, 0.0, 0.0]
+        )
+        self.external_torque = _vector3_from_params(
+            self, 'external_torque', 'external_torque', [0.0, 0.0, 0.0]
+        )
 
         core_share = get_package_share_directory('ga_ocp_core')
         self.xml_file = self.xml_file_param or f"{core_share}/{self.config.scene_relative_path}"
@@ -128,6 +270,7 @@ class MujocoJointExecutor(Node):
 
         self.publish_joint_state = self.create_publisher(JointState, self.joint_state_topic, 20)
         self.create_subscription(JointTrajectory, self.command_topic, self.trajectory_callback, 10)
+        self.create_subscription(String, '/planning_status', self.status_callback, 10)
 
         self.trajectory: List[Tuple[float, np.ndarray, np.ndarray, np.ndarray]] = []
         self.trajectory_start_time: Optional[float] = None
@@ -136,15 +279,24 @@ class MujocoJointExecutor(Node):
         self.velocity_target = np.zeros(self.n, dtype=float)
         self.effort_target = np.zeros(self.n, dtype=float)
 
+        self.stop_requested = False
         self.paused = False
         self.qpos_addrs: List[int] = []
         self.qvel_addrs: List[int] = []
         self.ctrl_addrs: List[int] = []
+        self.external_force_body_id: Optional[int] = None
 
         self.get_logger().info(
             f"MuJoCo executor ready. robot={self.robot}, mode={self.config.control_mode}, "
             f"model={self.xml_file}, cmd={self.command_topic}, state={self.joint_state_topic}, "
-            f"mass_scale={self.mass_scale:.3f}, payload_mass={self.payload_mass:.3f}"
+            f"mass_scale={self.mass_scale:.3f}, payload_mass={self.payload_mass:.3f}, "
+            f"payload_com={self.payload_com.tolist()}, "
+            f"link_com_offset={self.link_com_offset.tolist()}, viewer={self.enable_viewer}, "
+            f"external_body={self.external_force_body_name}, "
+            f"external_start={self.external_force_start_s:.3f}, "
+            f"external_duration={self.external_force_duration_s:.3f}, "
+            f"external_force={self.external_force.tolist()}, "
+            f"external_torque={self.external_torque.tolist()}"
         )
 
     def _lookup_body_id(self, model: mujoco.MjModel, body_name: str) -> int:
@@ -155,21 +307,31 @@ class MujocoJointExecutor(Node):
 
     def _apply_runtime_model_variations(self, model: mujoco.MjModel, data: mujoco.MjData) -> None:
         dirty = False
+        ur_moving_body_names = [
+            'shoulder_link',
+            'upper_arm_link',
+            'forearm_link',
+            'wrist_1_link',
+            'wrist_2_link',
+            'wrist_3_link',
+        ]
 
         if self.robot == 'ur' and abs(self.mass_scale - 1.0) > 1e-9:
-            for body_name in [
-                'shoulder_link',
-                'upper_arm_link',
-                'forearm_link',
-                'wrist_1_link',
-                'wrist_2_link',
-                'wrist_3_link',
-            ]:
+            for body_name in ur_moving_body_names:
                 body_id = self._lookup_body_id(model, body_name)
                 model.body_mass[body_id] *= self.mass_scale
                 model.body_inertia[body_id] *= self.mass_scale
             dirty = True
             self.get_logger().info(f'Applied UR10 mass/inertia scale {self.mass_scale:.3f} to MuJoCo plant.')
+
+        if self.robot == 'ur' and np.linalg.norm(self.link_com_offset) > 0.0:
+            for body_name in ur_moving_body_names:
+                body_id = self._lookup_body_id(model, body_name)
+                model.body_ipos[body_id] = model.body_ipos[body_id] + self.link_com_offset
+            dirty = True
+            self.get_logger().info(
+                f'Applied UR10 six-link COM offset {self.link_com_offset.tolist()} to MuJoCo plant.'
+            )
 
         if self.payload_mass > 0.0:
             body_id = self._lookup_body_id(model, self.payload_body_name)
@@ -184,6 +346,31 @@ class MujocoJointExecutor(Node):
 
         if dirty:
             mujoco.mj_setConst(model, data)
+
+    def _lookup_external_force_body(self, model: mujoco.MjModel) -> None:
+        has_force = np.linalg.norm(self.external_force) > 0.0
+        has_torque = np.linalg.norm(self.external_torque) > 0.0
+        if self.external_force_duration_s <= 0.0 or not (has_force or has_torque):
+            self.external_force_body_id = None
+            return
+        self.external_force_body_id = self._lookup_body_id(model, self.external_force_body_name)
+        self.get_logger().info(
+            f"External wrench enabled on body '{self.external_force_body_name}' "
+            f"from t={self.external_force_start_s:.3f}s for "
+            f"{self.external_force_duration_s:.3f}s."
+        )
+
+    def _apply_external_wrench(self, data: mujoco.MjData) -> None:
+        data.xfrc_applied[:, :] = 0.0
+        if self.external_force_body_id is None:
+            return
+        if data.time < self.external_force_start_s:
+            return
+        if data.time >= self.external_force_start_s + self.external_force_duration_s:
+            return
+        # MuJoCo spatial wrench order is torque first, then force.
+        data.xfrc_applied[self.external_force_body_id, 0:3] = self.external_torque
+        data.xfrc_applied[self.external_force_body_id, 3:6] = self.external_force
 
     def _lookup_joint_addresses(self, model: mujoco.MjModel) -> None:
         self.qpos_addrs = []
@@ -233,6 +420,10 @@ class MujocoJointExecutor(Node):
 
         time_from_start = point.time_from_start.sec + point.time_from_start.nanosec * 1e-9
         return time_from_start, positions, velocities, efforts
+
+    def status_callback(self, msg: String) -> None:
+        if 'finished' in msg.data:
+            self.stop_requested = True
 
     def trajectory_callback(self, msg: JointTrajectory) -> None:
         trajectory: List[Tuple[float, np.ndarray, np.ndarray, np.ndarray]] = []
@@ -301,47 +492,68 @@ class MujocoJointExecutor(Node):
 
         raise ValueError(f"Unsupported control mode '{self.config.control_mode}'")
 
+    def _run_loop(self, model: mujoco.MjModel, data: mujoco.MjData, viewer=None) -> None:
+        while rclpy.ok() and not self.stop_requested and (viewer is None or viewer.is_running()):
+            step_start = time.time()
+
+            self._sample_active_command(step_start)
+            current_position = self._publish_joint_state(data)
+            position_error = np.max(np.abs(current_position - self.position_target))
+
+            if not self.paused:
+                self._apply_control(data)
+                self._apply_external_wrench(data)
+                mujoco.mj_step(model, data)
+                if viewer is not None:
+                    viewer.sync()
+
+            if position_error < self.position_tolerance and not self.trajectory:
+                self.position_target = current_position.copy()
+
+            rclpy.spin_once(self, timeout_sec=0.0)
+
+            elapsed = time.time() - step_start
+            sleep_time = model.opt.timestep - elapsed
+            if sleep_time > 0.0:
+                time.sleep(sleep_time)
+
     def run(self) -> None:
         model = mujoco.MjModel.from_xml_path(self.xml_file)
         data = mujoco.MjData(model)
         self._apply_runtime_model_variations(model, data)
+        self._lookup_external_force_body(model)
         self._lookup_joint_addresses(model)
+        data.qpos[self.qpos_addrs] = self.default_target
+        data.qvel[self.qvel_addrs] = 0.0
         data.ctrl[self.ctrl_addrs] = self.default_target
+        mujoco.mj_forward(model, data)
 
-        with mujoco.viewer.launch_passive(model, data, key_callback=self.key_callback) as viewer:
-            while viewer.is_running() and rclpy.ok():
-                step_start = time.time()
-
-                self._sample_active_command(step_start)
-                current_position = self._publish_joint_state(data)
-                position_error = np.max(np.abs(current_position - self.position_target))
-
-                if not self.paused:
-                    self._apply_control(data)
-                    mujoco.mj_step(model, data)
-                    viewer.sync()
-
-                if position_error < self.position_tolerance and not self.trajectory:
-                    self.position_target = current_position.copy()
-
-                rclpy.spin_once(self, timeout_sec=0.0)
-
-                elapsed = time.time() - step_start
-                sleep_time = model.opt.timestep - elapsed
-                if sleep_time > 0.0:
-                    time.sleep(sleep_time)
+        if self.enable_viewer:
+            with mujoco.viewer.launch_passive(model, data, key_callback=self.key_callback) as viewer:
+                self._run_loop(model, data, viewer)
+        else:
+            self._run_loop(model, data, None)
 
 
 def main() -> None:
     rclpy.init()
     node = MujocoJointExecutor()
+
+    def request_stop(signum, frame):
+        del signum, frame
+        node.stop_requested = True
+
+    signal.signal(signal.SIGINT, request_stop)
+    signal.signal(signal.SIGTERM, request_stop)
+
     try:
         node.run()
     except KeyboardInterrupt:
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

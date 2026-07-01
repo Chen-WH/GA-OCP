@@ -30,6 +30,16 @@ find_package(std_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(CASADI QUIET casadi)
+option(GA_OCP_ROS2_ENABLE_CASADI "Enable CasADi backend for closed_loop_mpc_node" ON)
+if(GA_OCP_ROS2_ENABLE_CASADI AND CASADI_FOUND)
+  find_package(benchmark REQUIRED)
+endif()
+if(GA_OCP_ROS2_ENABLE_CASADI AND NOT CASADI_FOUND)
+  message(WARNING "CasADi was not found; closed_loop_mpc_node will reject backend:=casadi")
+endif()
+
 include_directories(
   ${EIGEN3_INCLUDE_DIR}
 )
@@ -84,6 +94,12 @@ target_link_libraries(closed_loop_mpc_node
   crocoddyl::crocoddyl
   pinocchio::pinocchio
 )
+if(GA_OCP_ROS2_ENABLE_CASADI AND CASADI_FOUND)
+  target_link_libraries(closed_loop_mpc_node ${CASADI_LIBRARIES} benchmark::benchmark)
+  target_compile_definitions(closed_loop_mpc_node PRIVATE GA_OCP_HAS_CASADI_BENCH=1)
+  target_include_directories(closed_loop_mpc_node PRIVATE ${CASADI_INCLUDE_DIRS})
+  target_link_directories(closed_loop_mpc_node PRIVATE ${CASADI_LIBRARY_DIRS})
+endif()
 ament_target_dependencies(closed_loop_mpc_node
   ament_index_cpp
   ga_ocp_core

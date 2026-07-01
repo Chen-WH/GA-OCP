@@ -12,7 +12,7 @@ using DurationSeconds = std::chrono::duration<double>;
 
 constexpr int kMinLevel = 1;
 constexpr int kMaxLevel = 7;
-constexpr int kMaxLevel_AD = 5;
+constexpr int kMaxLevel_AD = 7;
 constexpr int kSampleBatchSize = 10;
 constexpr int kBenchmarkIterations = 10;
 
@@ -357,33 +357,33 @@ void RunPinocchioCasadiIDMPCBenchmark(benchmark::State& state, int bf) {
 #endif
 
 void RegisterAll() {
-  benchmark::RegisterBenchmark("binary_tree/TetraPGA/CrocoddylFDDP", [](benchmark::State& s) {
-    RunGAFDDPBenchmark(s, 2);
+  benchmark::RegisterBenchmark("serial_chain/TetraPGA/CrocoddylFDDP", [](benchmark::State& s) {
+    RunGAFDDPBenchmark(s, 1);
   })->DenseRange(kMinLevel, kMaxLevel, 1)->Iterations(kBenchmarkIterations);
 
-  benchmark::RegisterBenchmark("binary_tree/Pinocchio/CrocoddylFDDP", [](benchmark::State& s) {
-    RunPinocchioFDDPBenchmark(s, 2);
+  benchmark::RegisterBenchmark("serial_chain/Pinocchio/CrocoddylFDDP", [](benchmark::State& s) {
+    RunPinocchioFDDPBenchmark(s, 1);
   })->DenseRange(kMinLevel, kMaxLevel, 1)->Iterations(kBenchmarkIterations);
 
   #ifdef GA_OCP_HAS_CASADI_BENCH
-  benchmark::RegisterBenchmark("binary_tree/CasADi/CrocoddylFDDP",
+  benchmark::RegisterBenchmark("serial_chain/CasADi/CrocoddylFDDP",
                                [](benchmark::State& s) {
-    RunPinocchioCasadiFDDPBenchmark(s, 2);
+    RunPinocchioCasadiFDDPBenchmark(s, 1);
   })->DenseRange(kMinLevel, kMaxLevel_AD, 1)->Iterations(kBenchmarkIterations);
   #endif
 
-  benchmark::RegisterBenchmark("binary_tree/TetraPGA/CrocoddylIDMPC", [](benchmark::State& s) {
-    RunGAIDMPCBenchmark(s, 2);
+  benchmark::RegisterBenchmark("serial_chain/TetraPGA/CrocoddylIDMPC", [](benchmark::State& s) {
+    RunGAIDMPCBenchmark(s, 1);
   })->DenseRange(kMinLevel, kMaxLevel, 1)->Iterations(kBenchmarkIterations);
 
-  benchmark::RegisterBenchmark("binary_tree/Pinocchio/CrocoddylIDMPC", [](benchmark::State& s) {
-    RunPinocchioIDMPCBenchmark(s, 2);
+  benchmark::RegisterBenchmark("serial_chain/Pinocchio/CrocoddylIDMPC", [](benchmark::State& s) {
+    RunPinocchioIDMPCBenchmark(s, 1);
   })->DenseRange(kMinLevel, kMaxLevel, 1)->Iterations(kBenchmarkIterations);
 
   #ifdef GA_OCP_HAS_CASADI_BENCH
-  benchmark::RegisterBenchmark("binary_tree/CasADi/CrocoddylIDMPC",
+  benchmark::RegisterBenchmark("serial_chain/CasADi/CrocoddylIDMPC",
                                [](benchmark::State& s) {
-    RunPinocchioCasadiIDMPCBenchmark(s, 2);
+    RunPinocchioCasadiIDMPCBenchmark(s, 1);
   })->DenseRange(kMinLevel, kMaxLevel_AD, 1)->Iterations(kBenchmarkIterations);
   #endif
 }
